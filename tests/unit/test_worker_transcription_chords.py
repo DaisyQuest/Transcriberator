@@ -32,6 +32,8 @@ class TestTranscriptionWorkerChordIsolation(unittest.TestCase):
         self.assertEqual(poly.event_count, 32)
         self.assertEqual(mono.detected_chords, ())
         self.assertEqual(poly.isolated_pitches, ())
+        self.assertEqual(mono.detected_instrument, "unknown")
+        self.assertEqual(poly.applied_preset, "auto")
         self.assertGreater(mono.confidence, poly.confidence)
 
     def test_identifies_major_and_minor_chords_and_isolates_stable_pitches(self):
@@ -53,6 +55,8 @@ class TestTranscriptionWorkerChordIsolation(unittest.TestCase):
         self.assertEqual(result.event_count, 17)
         self.assertEqual(result.detected_chords, ("C:major", "A:minor"))
         self.assertEqual(result.isolated_pitches, (57, 60, 64, 67))
+        self.assertEqual(result.detected_instrument, "acoustic_guitar")
+        self.assertEqual(result.applied_preset, "auto")
         self.assertGreaterEqual(result.confidence, 0.7)
         self.assertLessEqual(result.confidence, 0.99)
 
@@ -103,6 +107,13 @@ class TestTranscriptionWorkerChordIsolation(unittest.TestCase):
                 MODULE.TranscriptionTaskRequest(source_uri="blob://audio", polyphonic=True, model_version="")
             )
 
+        with self.assertRaisesRegex(ValueError, "instrument_preset must be one of"):
+            self.worker.process(
+                MODULE.TranscriptionTaskRequest(
+                    source_uri="blob://audio", polyphonic=True, instrument_preset="banjo"
+                )
+            )
+
         with self.assertRaisesRegex(ValueError, "cannot contain empty frames"):
             self.worker.process(
                 MODULE.TranscriptionTaskRequest(
@@ -132,7 +143,60 @@ class TestTranscriptionWorkerChordIsolation(unittest.TestCase):
 
         self.assertEqual(result.detected_chords, ())
         self.assertEqual(result.event_count, 5)
+        self.assertEqual(result.detected_instrument, "flute")
         self.assertGreater(result.confidence, 0.75)
+
+    def test_auto_preset_detects_flute_for_high_monophonic_range(self):
+        result = self.worker.process(
+            MODULE.TranscriptionTaskRequest(
+                source_uri="blob://flute",
+                polyphonic=False,
+                analysis_frames=((72,), (74,), (76,), (77,), (79,), (81,)),
+            )
+        )
+
+        self.assertEqual(result.detected_instrument, "flute")
+        self.assertEqual(result.applied_preset, "auto")
+
+    def test_auto_preset_detects_acoustic_guitar_for_polyphonic_midrange_chords(self):
+        result = self.worker.process(
+            MODULE.TranscriptionTaskRequest(
+                source_uri="blob://acoustic",
+                polyphonic=True,
+                analysis_frames=((43, 47, 50), (45, 48, 52), (43, 47, 50), (47, 50, 55)),
+            )
+        )
+
+        self.assertEqual(result.detected_instrument, "acoustic_guitar")
+
+    def test_manual_preset_overrides_auto_detection(self):
+        result = self.worker.process(
+            MODULE.TranscriptionTaskRequest(
+                source_uri="blob://manual",
+                polyphonic=False,
+                instrument_preset="electric_guitar",
+                analysis_frames=((80,), (81,), (83,), (85,)),
+            )
+        )
+
+        self.assertEqual(result.detected_instrument, "electric_guitar")
+        self.assertEqual(result.applied_preset, "electric_guitar")
+
+    def test_instrument_candidate_scoring_polyphony_branches(self):
+        profile = MODULE.TranscriptionWorker._INSTRUMENT_PRESETS["flute"]
+        mono_score = self.worker._score_instrument_candidate(
+            pitches=[72, 74, 76],
+            profile=profile,
+            chord_count=0,
+            polyphonic=False,
+        )
+        poly_score = self.worker._score_instrument_candidate(
+            pitches=[72, 74, 76],
+            profile=profile,
+            chord_count=0,
+            polyphonic=True,
+        )
+        self.assertGreater(mono_score, poly_score)
 
 
 if __name__ == "__main__":
