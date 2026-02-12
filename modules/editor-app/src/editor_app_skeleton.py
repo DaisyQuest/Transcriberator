@@ -1,9 +1,28 @@
-"""DT-009 Editor app skeleton state + core edit operations."""
+"""DT-009/DT-022 editor state + performance-aware edit operations."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import List, Tuple
+from time import perf_counter
+from typing import Callable, Dict, List, Tuple
+
+
+@dataclass(frozen=True)
+class OperationMetric:
+    """Captures a single measured editor operation runtime."""
+
+    operation: str
+    duration_ms: float
+
+
+@dataclass(frozen=True)
+class LatencyBudgetResult:
+    """Summarizes pass/fail details for an editor latency budget evaluation."""
+
+    operation: str
+    threshold_ms: float
+    observed_ms: float
+    passed: bool
 
 
 @dataclass(frozen=True)
@@ -17,10 +36,12 @@ class Note:
 class EditorState:
     """Minimal in-memory editor model with undo/redo and checkpoints."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, clock: Callable[[], float] | None = None) -> None:
         self._notes: List[Note] = []
         self._undo: List[Tuple[Note, ...]] = []
         self._redo: List[Tuple[Note, ...]] = []
+        self._clock = clock or perf_counter
+        self._operation_metrics: List[OperationMetric] = []
 
     @property
     def notes(self) -> List[Note]:
@@ -93,7 +114,48 @@ class EditorState:
             "noteCount": len(self._notes),
             "undoDepth": len(self._undo),
             "redoDepth": len(self._redo),
+            "metricsCaptured": len(self._operation_metrics),
         }
+
+    def execute_timed_operation(self, *, operation: str, action: Callable[[], None]) -> OperationMetric:
+        """Executes an editor action and records runtime in milliseconds."""
+
+        if not operation.strip():
+            raise ValueError("operation is required")
+
+        started_at = self._clock()
+        action()
+        ended_at = self._clock()
+        metric = OperationMetric(operation=operation, duration_ms=max(0.0, (ended_at - started_at) * 1000.0))
+        self._operation_metrics.append(metric)
+        return metric
+
+    def summarize_latency(self, *, operation: str) -> Dict[str, float]:
+        """Returns count/min/max/avg summary for measured operation timings."""
+
+        matching = [metric.duration_ms for metric in self._operation_metrics if metric.operation == operation]
+        if not matching:
+            raise ValueError(f"No metrics for operation '{operation}'")
+        return {
+            "count": float(len(matching)),
+            "minMs": min(matching),
+            "maxMs": max(matching),
+            "avgMs": sum(matching) / len(matching),
+        }
+
+    def evaluate_latency_budget(self, *, operation: str, threshold_ms: float) -> LatencyBudgetResult:
+        """Checks if the max observed duration for an operation satisfies a threshold."""
+
+        if threshold_ms <= 0:
+            raise ValueError("threshold_ms must be > 0")
+        summary = self.summarize_latency(operation=operation)
+        observed_ms = summary["maxMs"]
+        return LatencyBudgetResult(
+            operation=operation,
+            threshold_ms=threshold_ms,
+            observed_ms=observed_ms,
+            passed=observed_ms <= threshold_ms,
+        )
 
     @staticmethod
     def _validate_note(note: Note) -> None:
