@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://transcriberator.dev/schemas/shared-contracts/v1/stage_state_contract.schema.json",
+  "title": "OrchestratorStageStateContract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contractVersion", "stageOrder", "statuses", "transitions", "retryPolicy", "resumeSemantics"],
+  "properties": {
+    "contractVersion": {"type": "string", "const": "v1"},
+    "stageOrder": {
+      "type": "array",
+      "minItems": 7,
+      "items": {
+        "type": "string",
+        "enum": [
+          "decode_normalize",
+          "source_separation",
+          "tempo_map",
+          "transcription",
+          "quantization_cleanup",
+          "notation_generation",
+          "engraving"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "statuses": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["pending", "queued", "running", "succeeded", "failed", "retry_wait", "cancelled", "skipped"]
+      },
+      "minItems": 8,
+      "uniqueItems": true
+    },
+    "transitions": {
+      "type": "array",
+      "minItems": 8,
+      "items": {"$ref": "#/$defs/transition"}
+    },
+    "retryPolicy": {"$ref": "#/$defs/retryPolicy"},
+    "resumeSemantics": {"$ref": "#/$defs/resumeSemantics"},
+    "degradationPolicy": {"$ref": "#/$defs/degradationPolicy"}
+  },
+  "$defs": {
+    "transition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to", "condition"],
+      "properties": {
+        "from": {
+          "type": "string",
+          "enum": ["pending", "queued", "running", "succeeded", "failed", "retry_wait", "cancelled", "skipped"]
+        },
+        "to": {
+          "type": "string",
+          "enum": ["pending", "queued", "running", "succeeded", "failed", "retry_wait", "cancelled", "skipped"]
+        },
+        "condition": {"type": "string", "minLength": 1}
+      }
+    },
+    "retryPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxAttempts", "backoffStrategy", "baseDelaySeconds", "maxDelaySeconds", "jitter"],
+      "properties": {
+        "maxAttempts": {"type": "integer", "minimum": 1, "maximum": 10},
+        "backoffStrategy": {"type": "string", "enum": ["exponential"]},
+        "baseDelaySeconds": {"type": "number", "minimum": 0.1},
+        "maxDelaySeconds": {"type": "number", "minimum": 1},
+        "jitter": {"type": "string", "enum": ["full", "decorrelated"]},
+        "retryableErrorCategories": {
+          "type": "array",
+          "items": {"type": "string", "enum": ["dependency", "timeout", "resource"]},
+          "uniqueItems": true
+        }
+      }
+    },
+    "resumeSemantics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resumeFrom", "requiresCheckpointArtifacts", "idempotentReentry"],
+      "properties": {
+        "resumeFrom": {"type": "string", "enum": ["latest_successful_stage"]},
+        "requiresCheckpointArtifacts": {"type": "boolean", "const": true},
+        "idempotentReentry": {"type": "boolean", "const": true}
+      }
+    },
+    "degradationPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hqSeparationFailureAction": {
+          "type": "string",
+          "enum": ["fallback_to_draft_path", "fail_job"]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "irVersion": "v1",
+  "scoreId": "3f89bf42-85b8-445f-bd0f-a3799ee6d39e",
+  "sourceJobId": "68cd95f3-08db-4cf5-8b9c-f95ff4f5ad84",
+  "title": "Minimal Piano Sketch",
+  "globalMaps": {
+    "timeSignatures": [
+      {"measureIndex": 0, "beats": 4, "beatUnit": 4}
+    ],
+    "tempoMap": [
+      {"tick": 0, "bpm": 120.0}
+    ],
+    "keySignatures": [
+      {"measureIndex": 0, "tonic": "C", "mode": "major"}
+    ]
+  },
+  "parts": [
+    {
+      "partId": "piano-rh",
+      "name": "Piano RH",
+      "instrument": "Acoustic Grand Piano",
+      "measures": [
+        {
+          "measureIndex": 0,
+          "startTick": 0,
+          "durationTicks": 1920,
+          "voices": [
+            {
+              "voiceId": "v1",
+              "events": [
+                {
+                  "type": "note",
+                  "tick": 0,
+                  "durationTicks": 480,
+                  "pitchMidi": 60,
+                  "velocity": 96
+                },
+                {
+                  "type": "rest",
+                  "tick": 480,
+                  "durationTicks": 480
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

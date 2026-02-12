@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://transcriberator.dev/schemas/shared-contracts/v1/worker_rpc.schema.json",
+  "title": "WorkerRPCContracts",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contractVersion", "operations", "errorEnvelope"],
+  "properties": {
+    "contractVersion": {"type": "string", "const": "v1"},
+    "operations": {
+      "type": "array",
+      "minItems": 4,
+      "items": {"$ref": "#/$defs/operation"}
+    },
+    "errorEnvelope": {"$ref": "#/$defs/errorEnvelopeDefinition"}
+  },
+  "$defs": {
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "request", "response", "idempotency"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "enum": ["separation", "transcription", "quantization", "engraving"]
+        },
+        "request": {"$ref": "#/$defs/requestShape"},
+        "response": {"$ref": "#/$defs/responseShape"},
+        "idempotency": {"$ref": "#/$defs/idempotencySemantics"}
+      }
+    },
+    "requestShape": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["idempotencyKey", "jobId", "stageRunId", "inputArtifactUris", "config"],
+      "properties": {
+        "idempotencyKey": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9:_\\-]{16,128}$"
+        },
+        "jobId": {"type": "string", "format": "uuid"},
+        "stageRunId": {"type": "string", "format": "uuid"},
+        "inputArtifactUris": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "format": "uri"}
+        },
+        "config": {"type": "object", "additionalProperties": true},
+        "traceContext": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "traceId": {"type": "string", "minLength": 1},
+            "spanId": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    },
+    "responseShape": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ok"],
+      "properties": {
+        "ok": {"type": "boolean"},
+        "outputArtifactUris": {
+          "type": "array",
+          "items": {"type": "string", "format": "uri"}
+        },
+        "metrics": {
+          "type": "object",
+          "additionalProperties": {"type": "number"}
+        },
+        "error": {"$ref": "#/$defs/errorEnvelope"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"ok": {"const": true}}},
+          "then": {"required": ["outputArtifactUris"]}
+        },
+        {
+          "if": {"properties": {"ok": {"const": false}}},
+          "then": {"required": ["error"]}
+        }
+      ]
+    },
+    "errorEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "retryable", "category"],
+      "properties": {
+        "code": {"type": "string", "minLength": 1},
+        "message": {"type": "string", "minLength": 1},
+        "retryable": {"type": "boolean"},
+        "category": {
+          "type": "string",
+          "enum": ["validation", "dependency", "timeout", "resource", "internal"]
+        },
+        "details": {"type": "object", "additionalProperties": true}
+      }
+    },
+    "errorEnvelopeDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fields", "retryPolicyHints"],
+      "properties": {
+        "fields": {
+          "type": "array",
+          "minItems": 4,
+          "items": {"type": "string"}
+        },
+        "retryPolicyHints": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["retryableCategories"],
+          "properties": {
+            "retryableCategories": {
+              "type": "array",
+              "items": {"type": "string", "enum": ["dependency", "timeout", "resource"]},
+              "minItems": 1
+            }
+          }
+        }
+      }
+    },
+    "idempotencySemantics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "ttlHours", "collisionBehavior"],
+      "properties": {
+        "scope": {"type": "string", "const": "jobId+stageRunId+operation"},
+        "ttlHours": {"type": "integer", "minimum": 1, "maximum": 168},
+        "collisionBehavior": {
+          "type": "string",
+          "enum": ["return_cached_success", "reject_mismatched_payload", "allow_retry_if_failed"]
+        }
+      }
+    }
+  }
+}
