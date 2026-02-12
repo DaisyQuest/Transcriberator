@@ -784,19 +784,31 @@ def _infer_segment_pitch_midi(*, analysis_window: list[int], sample_rate: int) -
     if len(analysis_window) < 32 or sample_rate <= 0:
         return None
 
+    if _calculate_window_rms(analysis_window=analysis_window) < 5.0:
+        return None
+
     zero_crossing_frequency = _estimate_frequency_zero_crossing(analysis_window=analysis_window, sample_rate=sample_rate)
     autocorrelation_frequency = _estimate_frequency_autocorrelation(analysis_window=analysis_window, sample_rate=sample_rate)
+    spectral_frequency = _estimate_frequency_spectral_peak(analysis_window=analysis_window, sample_rate=sample_rate)
 
     candidate_frequencies = [
         frequency
-        for frequency in (zero_crossing_frequency, autocorrelation_frequency)
+        for frequency in (zero_crossing_frequency, autocorrelation_frequency, spectral_frequency)
         if frequency is not None and 40 <= frequency <= 2_000
     ]
     if not candidate_frequencies:
         return None
 
-    if len(candidate_frequencies) == 2 and abs(candidate_frequencies[0] - candidate_frequencies[1]) <= 24:
-        frequency_hz = sum(candidate_frequencies) / len(candidate_frequencies)
+    if len(candidate_frequencies) >= 2:
+        clustered_frequencies = _cluster_frequency_candidates(candidate_frequencies=candidate_frequencies)
+        if clustered_frequencies:
+            frequency_hz = sum(clustered_frequencies) / len(clustered_frequencies)
+        elif autocorrelation_frequency is not None:
+            frequency_hz = autocorrelation_frequency
+        elif spectral_frequency is not None:
+            frequency_hz = spectral_frequency
+        else:
+            frequency_hz = candidate_frequencies[0]
     elif autocorrelation_frequency is not None:
         frequency_hz = autocorrelation_frequency
     else:
@@ -876,6 +888,69 @@ def _estimate_frequency_autocorrelation(*, analysis_window: list[int], sample_ra
     if frequency_hz < 40 or frequency_hz > 2_000:
         return None
     return frequency_hz
+
+
+def _estimate_frequency_spectral_peak(*, analysis_window: list[int], sample_rate: int) -> float | None:
+    if len(analysis_window) < 64:
+        return None
+
+    centered = [value - (sum(analysis_window) / len(analysis_window)) for value in analysis_window]
+    windowed = [sample * (0.5 - (0.5 * math.cos((2 * math.pi * index) / (len(centered) - 1)))) for index, sample in enumerate(centered)]
+    total_energy = sum(sample * sample for sample in windowed)
+    if total_energy <= 0:
+        return None
+
+    min_frequency = 40
+    max_frequency = 2_000
+    max_bin = min(len(windowed) // 2, int((max_frequency * len(windowed)) / sample_rate))
+    min_bin = max(1, int((min_frequency * len(windowed)) / sample_rate))
+    if min_bin >= max_bin:
+        return None
+
+    best_bin = min_bin
+    best_magnitude = 0.0
+    for frequency_bin in range(min_bin, max_bin + 1):
+        real = 0.0
+        imaginary = 0.0
+        for sample_index, sample in enumerate(windowed):
+            angle = (2 * math.pi * frequency_bin * sample_index) / len(windowed)
+            real += sample * math.cos(angle)
+            imaginary -= sample * math.sin(angle)
+        magnitude = (real * real) + (imaginary * imaginary)
+        if magnitude > best_magnitude:
+            best_magnitude = magnitude
+            best_bin = frequency_bin
+
+    if best_magnitude <= (total_energy * 0.05):
+        return None
+
+    frequency_hz = (best_bin * sample_rate) / len(windowed)
+    if frequency_hz < min_frequency or frequency_hz > max_frequency:
+        return None
+    return frequency_hz
+
+
+def _cluster_frequency_candidates(*, candidate_frequencies: list[float]) -> list[float]:
+    if len(candidate_frequencies) < 2:
+        return candidate_frequencies
+
+    sorted_frequencies = sorted(candidate_frequencies)
+    clusters: list[list[float]] = [[sorted_frequencies[0]]]
+    for frequency in sorted_frequencies[1:]:
+        if abs(frequency - clusters[-1][-1]) <= 30:
+            clusters[-1].append(frequency)
+            continue
+        clusters.append([frequency])
+
+    best_cluster = max(clusters, key=lambda cluster: (len(cluster), -abs(sum(cluster) / len(cluster) - 440.0)))
+    return best_cluster if len(best_cluster) >= 2 else []
+
+
+def _calculate_window_rms(*, analysis_window: list[int]) -> float:
+    if not analysis_window:
+        return 0.0
+    energy = sum(sample * sample for sample in analysis_window) / len(analysis_window)
+    return math.sqrt(energy)
 
 
 def _smooth_detected_melody(*, melody: list[int]) -> list[int]:
