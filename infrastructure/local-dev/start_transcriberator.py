@@ -156,12 +156,88 @@ def _build_transcription_text(*, audio_file: str, mode: str, stages: list[dict[s
     )
 
 
+def _build_sheet_artifacts(*, job_id: str, uploads_dir: Path, audio_file: str) -> list[dict[str, str]]:
+    stem = Path(audio_file).stem
+    artifact_specs = [
+        (
+            "musicxml",
+            ".musicxml",
+            "application/vnd.recordare.musicxml+xml",
+            (
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                "<!DOCTYPE score-partwise PUBLIC \"-//Recordare//DTD MusicXML 4.0 Partwise//EN\" "
+                "\"http://www.musicxml.org/dtds/partwise.dtd\">\n"
+                "<score-partwise version=\"4.0\">\n"
+                "  <part-list><score-part id=\"P1\"><part-name>Transcription</part-name></score-part></part-list>\n"
+                "  <part id=\"P1\">\n"
+                "    <measure number=\"1\">\n"
+                "      <attributes><divisions>1</divisions><key><fifths>0</fifths></key>"
+                "<time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>\n"
+                "      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>\n"
+                "      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>\n"
+                "      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>\n"
+                "      <note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type></note>\n"
+                "    </measure>\n"
+                "  </part>\n"
+                "</score-partwise>\n"
+            ),
+        ),
+        (
+            "midi",
+            ".mid",
+            "audio/midi",
+            "MIDI placeholder: open this artifact in a DAW for local validation.\n",
+        ),
+        (
+            "pdf",
+            ".pdf",
+            "application/pdf",
+            "%PDF-1.4\n% Transcriberator local placeholder score export\n",
+        ),
+        (
+            "png",
+            ".png",
+            "image/png",
+            "PNG placeholder: score preview generated locally.\n",
+        ),
+    ]
+
+    artifacts: list[dict[str, str]] = []
+    for artifact_name, extension, content_type, content in artifact_specs:
+        artifact_path = uploads_dir / f"{job_id}_{stem}{extension}"
+        artifact_path.write_text(content, encoding="utf-8")
+        artifacts.append(
+            {
+                "name": artifact_name,
+                "path": str(artifact_path),
+                "contentType": content_type,
+                "downloadPath": f"/outputs/artifact?job={job_id}&name={artifact_name}",
+            }
+        )
+    return artifacts
+
+
+def _augment_transcription_with_artifacts(*, transcription_text: str, artifacts: list[dict[str, str]]) -> str:
+    artifact_lines = "\n".join(f"- {artifact['name']}: {artifact['path']}" for artifact in artifacts)
+    return (
+        f"{transcription_text}\n"
+        "Generated sheet music artifacts\n"
+        f"{artifact_lines}\n"
+    )
+
+
 def _render_page(*, owner_id: str, default_mode: str, jobs: list[dict[str, Any]], message: str = "") -> str:
     rows = []
     for job in jobs:
         stage_rows = "".join(
             f"<li><strong>{html.escape(stage['stage_name'])}</strong>: {html.escape(stage['status'])} — {html.escape(stage['detail'])}</li>"
             for stage in job["stages"]
+        )
+        artifact_rows = "".join(
+            f"<li><strong>{html.escape(artifact['name'])}</strong>: "
+            f"<code>{html.escape(artifact['path'])}</code> "
+            f"(<a href='{html.escape(artifact['downloadPath'])}' target='_blank' rel='noopener'>open</a>)</li>"
+            for artifact in job.get("sheetArtifacts", [])
         )
         rows.append(
             "<article class='job-card'>"
@@ -171,6 +247,7 @@ def _render_page(*, owner_id: str, default_mode: str, jobs: list[dict[str, Any]]
             f"<p><strong>Submitted:</strong> {html.escape(job['submittedAtUtc'])}</p>"
             f"<p><strong>Transcription output:</strong> <code>{html.escape(job['transcriptionPath'])}</code><br/>"
             f"<a href='/outputs/transcription?job={html.escape(job['jobId'])}' target='_blank' rel='noopener'>View raw output</a></p>"
+            f"<p><strong>Sheet music artifacts:</strong></p><ul>{artifact_rows or '<li>No artifacts recorded.</li>'}</ul>"
             "<form action='/edit-transcription' method='post'>"
             f"<input type='hidden' name='job_id' value='{html.escape(job['jobId'])}'/>"
             "<label><strong>Edit transcription:</strong><br/>"
@@ -254,6 +331,10 @@ def serve_dashboard(*, config: DashboardServerConfig) -> None:
                 self._serve_transcription_output(parsed.query)
                 return
 
+            if parsed.path == "/outputs/artifact":
+                self._serve_artifact_output(parsed.query)
+                return
+
             if parsed.path != "/":
                 self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
                 return
@@ -285,6 +366,35 @@ def serve_dashboard(*, config: DashboardServerConfig) -> None:
             payload = job["transcriptionText"].encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def _serve_artifact_output(self, query: str) -> None:
+            params = parse_qs(query)
+            job_id = params.get("job", [""])[0]
+            artifact_name = params.get("name", [""])[0]
+            job = next((candidate for candidate in state["jobs"] if candidate["jobId"] == job_id), None)
+            if not job:
+                self.send_error(HTTPStatus.NOT_FOUND, "Job artifacts not found")
+                return
+
+            artifact = next(
+                (candidate for candidate in job.get("sheetArtifacts", []) if candidate["name"] == artifact_name),
+                None,
+            )
+            if not artifact:
+                self.send_error(HTTPStatus.NOT_FOUND, "Artifact not found")
+                return
+
+            artifact_path = Path(artifact["path"])
+            if not artifact_path.exists():
+                self.send_error(HTTPStatus.NOT_FOUND, "Artifact file missing")
+                return
+
+            payload = artifact_path.read_text(encoding="utf-8").encode("utf-8")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", f"{artifact['contentType']}; charset=utf-8")
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
@@ -406,15 +516,22 @@ def serve_dashboard(*, config: DashboardServerConfig) -> None:
                 mode=normalized_mode,
                 stages=summary["stages"],
             )
+            artifacts = _build_sheet_artifacts(job_id=job.id, uploads_dir=state["uploads_dir"], audio_file=safe_filename)
+            transcription_text = _augment_transcription_with_artifacts(
+                transcription_text=transcription_text,
+                artifacts=artifacts,
+            )
             transcription_path = state["uploads_dir"] / f"{job.id}_transcription.txt"
             transcription_path.write_text(transcription_text, encoding="utf-8")
             summary["transcriptionPath"] = str(transcription_path)
             summary["transcriptionText"] = transcription_text
+            summary["sheetArtifacts"] = artifacts
             state["jobs"].append(summary)
             return (
                 f"Transcription complete for {safe_filename}. "
                 f"Job {job.id} finished with status {summary['finalStatus']}. "
-                f"Output: {summary['transcriptionPath']}"
+                f"Output: {summary['transcriptionPath']}. "
+                f"Sheet music: {', '.join(artifact['path'] for artifact in artifacts)}"
             )
 
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
