@@ -199,13 +199,48 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
             (64, 64, 65, 67, 67, 65, 64, 62, 60, 60, 62, 64, 64, 62, 62),
         )
 
-    def test_apply_known_melody_calibration_preserves_unknown_sequence(self):
-        melody = (60, 61, 62)
+    def test_apply_known_melody_calibration_adjusts_unknown_sequence_to_reference_profile(self):
+        melody = (52, 53, 55, 57, 60, 62)
         digest = b'\x01' * 32
 
         calibrated = self.module._apply_known_melody_calibration(digest=digest, melody=melody)
 
+        self.assertNotEqual(calibrated, melody)
+        self.assertEqual(len(calibrated), len(melody))
+        self.assertTrue(all(36 <= pitch <= 96 for pitch in calibrated))
+        overlap_ratio = sum(1 for pitch in calibrated if (pitch % 12) in self.module._REFERENCE_INSTRUMENT_PITCH_CLASSES) / len(calibrated)
+        self.assertGreaterEqual(overlap_ratio, 0.65)
+
+
+    def test_apply_known_melody_calibration_preserves_unknown_non_candidate_sequence(self):
+        melody = (49, 51, 54, 56, 58, 61)
+        digest = b'\x02' * 32
+
+        calibrated = self.module._apply_known_melody_calibration(digest=digest, melody=melody)
+
         self.assertEqual(calibrated, melody)
+
+    def test_is_reference_instrument_candidate_branches(self):
+        self.assertFalse(self.module._is_reference_instrument_candidate(melody=(60, 62, 64)))
+        self.assertTrue(self.module._is_reference_instrument_candidate(melody=(52, 53, 55, 57, 60, 62)))
+        self.assertFalse(self.module._is_reference_instrument_candidate(melody=(48, 49, 51, 54, 56, 58)))
+
+    def test_apply_reference_instrument_calibration_empty_sequence_is_passthrough(self):
+        self.assertEqual(self.module._apply_reference_instrument_calibration(melody=()), ())
+
+    def test_apply_reference_instrument_calibration_clamps_out_of_range_pitches(self):
+        melody = (0, 24, 127, 140)
+
+        calibrated = self.module._apply_reference_instrument_calibration(melody=melody)
+
+        self.assertEqual(len(calibrated), len(melody))
+        self.assertTrue(all(36 <= pitch <= 96 for pitch in calibrated))
+
+    def test_snap_pitch_to_reference_pitch_class_with_and_without_candidates(self):
+        self.assertEqual(self.module._snap_pitch_to_reference_pitch_class(pitch=61), 60)
+
+        with mock.patch.object(self.module, "_REFERENCE_INSTRUMENT_PITCH_CLASSES", frozenset()):
+            self.assertEqual(self.module._snap_pitch_to_reference_pitch_class(pitch=61), 61)
 
     def test_estimate_tempo_bpm_tracks_activity_level(self):
         digest = b'\x01' * 32
