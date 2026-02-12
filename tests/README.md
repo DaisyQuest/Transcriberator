@@ -28,3 +28,15 @@ Conventions:
 
 - All test commands must run with default Python tooling on Windows (PowerShell or CMD).
 - Avoid shell-specific assumptions in test code.
+
+
+## Pytest Regression Gate (DT-025)
+
+Primary release gate command:
+
+- `pytest --cov=. --cov-branch --cov-report=term-missing --cov-report=xml --cov-fail-under=95`
+
+Notes:
+- `pytest.ini` enforces `--import-mode=importlib` to avoid duplicate test module name collisions.
+- `.coveragerc` enforces branch coverage threshold policy (`fail_under = 95`).
+- Equivalent Windows command uses `py -m pytest ...` from repository root.

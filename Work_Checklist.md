@@ -90,3 +90,6 @@ Implementation checklist mirroring `Final_Spec.md`. Every item has a unique chec
 
 
 - [x] WC-TASK-009: Complete DT-024 milestone acceptance by publishing M0/M1/M2/M3 gate checklist documentation, validating dependency evidence, and enforcing release test+coverage gates.
+
+
+- [x] WC-TASK-010: Complete DT-025 final regression and branch coverage gate by enforcing pytest import-mode stability, CI branch-coverage threshold (>=95%), Windows runbook alignment checks, and publishing user guide artifacts.

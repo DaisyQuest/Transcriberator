@@ -1,0 +1,11 @@
+[run]
+branch = True
+source =
+    modules
+    tests
+
+[report]
+fail_under = 95
+show_missing = True
+skip_empty = True
+precision = 2
