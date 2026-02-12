@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://transcriberator.dev/schemas/shared-contracts/v1/stage_run.schema.json",
+  "title": "StageRun",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "jobId",
+    "stageName",
+    "attempt",
+    "status",
+    "inputArtifactUris",
+    "outputArtifactUris",
+    "createdAt",
+    "updatedAt"
+  ],
+  "properties": {
+    "id": {"type": "string", "format": "uuid"},
+    "jobId": {"type": "string", "format": "uuid"},
+    "stageName": {
+      "type": "string",
+      "enum": [
+        "decode_normalize",
+        "source_separation",
+        "tempo_map",
+        "transcription",
+        "quantization_cleanup",
+        "notation_generation",
+        "engraving"
+      ]
+    },
+    "attempt": {"type": "integer", "minimum": 1},
+    "status": {
+      "type": "string",
+      "enum": ["queued", "running", "succeeded", "failed", "skipped"]
+    },
+    "inputArtifactUris": {
+      "type": "array",
+      "items": {"type": "string", "format": "uri"}
+    },
+    "outputArtifactUris": {
+      "type": "array",
+      "items": {"type": "string", "format": "uri"}
+    },
+    "errorCode": {"type": "string"},
+    "errorSummary": {"type": "string"},
+    "createdAt": {"type": "string", "format": "date-time"},
+    "updatedAt": {"type": "string", "format": "date-time"},
+    "startedAt": {"type": "string", "format": "date-time"},
+    "finishedAt": {"type": "string", "format": "date-time"}
+  }
+}

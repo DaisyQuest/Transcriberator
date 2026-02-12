@@ -8,9 +8,11 @@ class TestScaffoldGovernance(unittest.TestCase):
         text = Path('AGENTS.md').read_text(encoding='utf-8')
         required = [
             'Read `Final_Spec.md` at the start of every task.',
+            'map requested work to `Development_Tasks.md` dependencies',
             "read that module's `$ModuleName_Spec.md` first.",
             'check `additional_tasks/` within that module',
             'Run all tests before committing.',
+            'Provide testing with at least 95% branch coverage.',
             'create `$taskslug_work_description.md` in `/workdescriptions`',
             'check off the relevant checkbox in `Work_Checklist.md`',
         ]
@@ -37,20 +39,18 @@ class TestScaffoldGovernance(unittest.TestCase):
                 self.assertTrue(extra.is_dir(), f"Missing {extra}")
                 self.assertTrue((extra / 'README.md').is_file(), f"Missing {extra / 'README.md'}")
 
-    def test_work_checklist_contains_checked_task(self):
+    def test_work_checklist_contains_checked_foundation_tasks(self):
         text = Path('Work_Checklist.md').read_text(encoding='utf-8')
         self.assertIn('## Task Completion Checkboxes', text)
-        self.assertRegex(text, r'- \[x\] WC-TASK-001:')
+        for task_id in ['WC-TASK-001', 'WC-TASK-002', 'WC-TASK-003']:
+            with self.subTest(task_id=task_id):
+                self.assertRegex(text, rf'- \[x\] {task_id}:')
 
     def test_final_spec_identifiers_are_unique(self):
         text = Path('Final_Spec.md').read_text(encoding='utf-8')
         ids = re.findall(r'^## (FS-\d{3}) ', text, flags=re.MULTILINE)
         self.assertEqual(len(ids), len(set(ids)))
         self.assertGreaterEqual(len(ids), 68)
-
-
-if __name__ == '__main__':
-    unittest.main()
 
 
 class TestDevelopmentTaskPlan(unittest.TestCase):
@@ -93,17 +93,37 @@ class TestDevelopmentTaskPlan(unittest.TestCase):
             with self.subTest(marker=marker):
                 self.assertIn(marker, text)
 
-    def test_work_checklist_has_new_checked_task(self):
-        text = Path('Work_Checklist.md').read_text(encoding='utf-8')
-        self.assertRegex(
-            text,
-            r'- \[x\] WC-TASK-002: Create `Development_Tasks\.md` with serial-first shared-contract planning and conflict-minimizing delegation guidance\.',
-        )
-
-    def test_workdescription_exists_for_task(self):
+    def test_workdescription_exists_for_development_task_plan(self):
         path = Path('workdescriptions/development-task-plan_work_description.md')
         self.assertTrue(path.is_file())
         content = path.read_text(encoding='utf-8')
         for item in ['## Summary', '## Work Performed', '## Validation']:
             with self.subTest(item=item):
                 self.assertIn(item, content)
+
+
+class TestTestHarnessBaseline(unittest.TestCase):
+    def test_suite_directories_exist(self):
+        for rel_path in ['tests/unit', 'tests/integration', 'tests/performance']:
+            with self.subTest(path=rel_path):
+                path = Path(rel_path)
+                self.assertTrue(path.is_dir())
+                self.assertTrue((path / '__init__.py').is_file())
+
+    def test_test_readme_defines_discovery_and_layout_guidance(self):
+        text = Path('tests/README.md').read_text(encoding='utf-8')
+        expected_snippets = [
+            'python -m unittest discover -s tests -t .',
+            'Unit tests live in `tests/unit/`',
+            'Integration tests live in `tests/integration/`',
+            'Performance tests live in `tests/performance/`',
+            'Maintain at least 95% branch coverage',
+            'run with default Python tooling on Windows',
+        ]
+        for snippet in expected_snippets:
+            with self.subTest(snippet=snippet):
+                self.assertIn(snippet, text)
+
+
+if __name__ == '__main__':
+    unittest.main()
