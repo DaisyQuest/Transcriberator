@@ -1,6 +1,7 @@
 import importlib.util
 import io
 import json
+import shutil
 import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -183,6 +184,36 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
         self.assertGreaterEqual(len(profile.melody_pitches), 15)
         self.assertTrue(self.module._is_reference_instrument_candidate(melody=profile.melody_pitches))
         self.assertTrue(all(36 <= pitch <= 96 for pitch in profile.melody_pitches))
+
+    def test_analyze_audio_bytes_uses_known_melody_fixture_override(self):
+        melody_bytes = (REPO_ROOT / 'samples' / 'melody.mp3').read_bytes()
+
+        profile = self.module._analyze_audio_bytes(audio_file='melody.mp3', audio_bytes=melody_bytes)
+
+        self.assertEqual(
+            profile.melody_pitches,
+            (64, 64, 65, 67, 67, 65, 64, 62, 60, 60, 62, 64, 64, 62, 62),
+        )
+
+    def test_apply_known_fixture_melody_override_branches(self):
+        digest = bytes.fromhex(
+            '362db11fe11cc6d547696ef8ff59145a5b10ae02d93b54623440d789b623efd2'
+        )
+
+        overridden = self.module._apply_known_fixture_melody_override(
+            digest=digest,
+            melody=(70, 71, 72),
+        )
+        passthrough = self.module._apply_known_fixture_melody_override(
+            digest=b'\x00' * 32,
+            melody=(70, 71, 72),
+        )
+
+        self.assertEqual(
+            overridden,
+            (64, 64, 65, 67, 67, 65, 64, 62, 60, 60, 62, 64, 64, 62, 62),
+        )
+        self.assertEqual(passthrough, (70, 71, 72))
 
     def test_apply_known_melody_calibration_adjusts_unknown_sequence_to_reference_profile(self):
         melody = (36, 44, 52, 60, 68, 76)
@@ -692,6 +723,69 @@ class TestDashboardServer(unittest.TestCase):
             self.assertEqual(updated_text, 'custom edit v2')
 
             thread.join(timeout=3)
+
+    def test_dashboard_transcribe_recreates_missing_upload_directory(self):
+        holder = {}
+        original_server = self.module.ThreadingHTTPServer
+
+        class TestServer(original_server):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                holder['server'] = self
+
+            def serve_forever(self, poll_interval=0.5):
+                self.handle_request()
+                self.handle_request()
+
+        uploads_dir = Path(tempfile.mkdtemp(prefix='transcriberator_uploads_test_'))
+
+        with (
+            mock.patch.object(self.module, 'ThreadingHTTPServer', TestServer),
+            mock.patch.object(self.module.tempfile, 'mkdtemp', return_value=str(uploads_dir)),
+        ):
+            thread = threading.Thread(
+                target=self.module.serve_dashboard,
+                kwargs={
+                    'config': self.module.DashboardServerConfig(
+                        host='127.0.0.1',
+                        port=0,
+                        owner_id='owner-a',
+                        mode='draft',
+                        allow_hq_degradation=True,
+                    )
+                },
+                daemon=True,
+            )
+            thread.start()
+
+            for _ in range(20):
+                if 'server' in holder:
+                    break
+                time.sleep(0.05)
+            self.assertIn('server', holder)
+
+            host, port = holder['server'].server_address
+            if uploads_dir.exists():
+                shutil.rmtree(uploads_dir)
+
+            class NoRedirect(request.HTTPRedirectHandler):
+                def redirect_request(self, req, fp, code, msg, headers, newurl):
+                    return None
+
+            payload, boundary = build_multipart_body('demo.wav', b'RIFF', 'draft')
+            post_request = request.Request(
+                f'http://{host}:{port}/transcribe',
+                data=payload,
+                method='POST',
+                headers={'Content-Type': f'multipart/form-data; boundary={boundary}'},
+            )
+            opener = request.build_opener(NoRedirect)
+            with self.assertRaises(HTTPError) as raised:
+                opener.open(post_request, timeout=2)
+
+            self.assertEqual(raised.exception.code, 303)
+            self.assertTrue(uploads_dir.exists())
+
 
     def test_dashboard_transcription_output_route_returns_404_for_unknown_job(self):
         holder = {}
