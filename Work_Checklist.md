@@ -83,5 +83,6 @@ Implementation checklist mirroring `Final_Spec.md`. Every item has a unique chec
 - [x] WC-TASK-005: Complete DT-007/DT-008/DT-009 by adding dashboard-api, dashboard-ui, and editor-app skeletons with comprehensive branch coverage tests.
 - [x] WC-TASK-006: Complete DT-016 by publishing local-dev infrastructure bootstrap assets and a Windows-focused local runbook baseline with automated governance tests.
 - [x] WC-TASK-007: Complete DT-017/DT-018/DT-019 by adding draft+HQ+revision/export integration adapters with comprehensive integration tests across success and failure branches.
+- [x] WC-TASK-008: Complete DT-021 by adding orchestrator and worker failure-path recovery integration tests with branch-coverage validation.
 - [x] WC-TASK-008: Complete DT-020 by adding module-local observability instrumentation for draft/HQ pipeline adapters with exhaustive integration observability tests.
 
