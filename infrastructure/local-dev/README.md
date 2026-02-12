@@ -7,6 +7,7 @@ This folder hosts infrastructure-facing assets that define the local development
 - `bootstrap.ps1`: PowerShell bootstrap helper for Windows.
 - `bootstrap.sh`: Bash bootstrap helper for Unix-like systems.
 - `env.example`: canonical environment variable template for local development.
+- `start_transcriberator.py`: canonical cross-platform Python startup entrypoint.
 
 ## Usage
 
@@ -22,6 +23,30 @@ Set-ExecutionPolicy -Scope Process Bypass
 ```bash
 bash infrastructure/local-dev/bootstrap.sh
 ```
+
+## Standard System Entrypoints
+
+After bootstrap, launch the local skeleton system using one of the repository-root wrappers:
+
+### Linux/macOS/Git Bash
+
+```bash
+./start.sh --mode draft
+```
+
+### Windows PowerShell
+
+```powershell
+.\start.ps1 -mode hq
+```
+
+Both wrappers delegate to:
+
+```text
+python infrastructure/local-dev/start_transcriberator.py
+```
+
+You can pass `--json` for machine-readable output and `--fail-stage <stage-name>` for startup troubleshooting drills.
 
 ## Guardrails
 

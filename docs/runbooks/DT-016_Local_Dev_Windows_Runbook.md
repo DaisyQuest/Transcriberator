@@ -41,6 +41,26 @@ python -m pip install --upgrade pip
 
 > If script execution policy blocks activation on Windows, run `Set-ExecutionPolicy -Scope Process Bypass` in the current PowerShell session.
 
+## Standard Application Entrypoint
+
+Use the repository-root wrappers so startup commands are consistent across Linux and Windows:
+
+### Linux/macOS/Git Bash
+
+```bash
+./start.sh --mode draft
+```
+
+### Windows PowerShell
+
+```powershell
+.\start.ps1 -mode hq
+```
+
+Both wrappers call `infrastructure/local-dev/start_transcriberator.py`, which performs a deterministic startup smoke run spanning dashboard API project/job creation and orchestrator pipeline execution.
+
+Use `--json` for machine-readable output and `--fail-stage source_separation --no-hq-degradation` to validate failure-path observability.
+
 ## Local Validation Workflow
 
 Run from repository root:

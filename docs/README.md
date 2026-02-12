@@ -16,3 +16,9 @@ This folder contains implementation-facing documentation for building the Transc
 
 - `../userguide.md`: markdown user guide for local/offline reading.
 - `../userguide.html`: accessible high-tech HTML guide for browser-first navigation.
+
+
+## Local Entrypoints
+
+- Standard entrypoint wrappers at repository root: `start.sh` (Linux/macOS) and `start.ps1` (Windows).
+- Canonical startup implementation: `infrastructure/local-dev/start_transcriberator.py`.

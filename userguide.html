@@ -114,6 +114,7 @@
   <nav aria-label="Table of contents">
     <ul>
       <li><a href="#quick-start">Quick Start</a></li>
+      <li><a href="#entrypoints">Standard Entrypoints</a></li>
       <li><a href="#modes">System Modes</a></li>
       <li><a href="#workflow">End-to-End Workflow</a></li>
       <li><a href="#observability">Observability & Quality</a></li>
@@ -133,6 +134,20 @@
         <li>Open editor views and apply note, timing, and revision controls.</li>
         <li>Export and review generated artifacts.</li>
       </ol>
+    </section>
+
+
+    <section id="entrypoints" aria-labelledby="entrypoints-heading">
+      <h2 id="entrypoints-heading">Standard Entrypoints (Windows/Linux)</h2>
+      <p>Use repository-root wrappers for consistent startup behavior:</p>
+      <pre><code>./start.sh --mode draft
+.\start.ps1 -mode hq</code></pre>
+      <p>Both wrappers delegate to <code>infrastructure/local-dev/start_transcriberator.py</code>, which runs a deterministic startup smoke path over dashboard API and orchestrator skeletons to guarantee the application can start locally.</p>
+      <ul>
+        <li><code>--json</code>: emit machine-readable startup output.</li>
+        <li><code>--fail-stage &lt;stage-name&gt;</code>: simulate startup failures for troubleshooting.</li>
+        <li><code>--no-hq-degradation</code>: disable HQ fallback so separation failures fail fast.</li>
+      </ul>
     </section>
 
     <section id="modes" aria-labelledby="modes-heading">
