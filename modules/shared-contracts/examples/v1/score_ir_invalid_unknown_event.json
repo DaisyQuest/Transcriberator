@@ -1,0 +1,40 @@
+{
+  "irVersion": "v1",
+  "scoreId": "3f89bf42-85b8-445f-bd0f-a3799ee6d39e",
+  "globalMaps": {
+    "timeSignatures": [
+      {"measureIndex": 0, "beats": 4, "beatUnit": 4}
+    ],
+    "tempoMap": [
+      {"tick": 0, "bpm": 120.0}
+    ],
+    "keySignatures": [
+      {"measureIndex": 0, "tonic": "C", "mode": "major"}
+    ]
+  },
+  "parts": [
+    {
+      "partId": "piano-rh",
+      "name": "Piano RH",
+      "measures": [
+        {
+          "measureIndex": 0,
+          "startTick": 0,
+          "durationTicks": 1920,
+          "voices": [
+            {
+              "voiceId": "v1",
+              "events": [
+                {
+                  "type": "chord",
+                  "tick": 0,
+                  "durationTicks": 480
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
