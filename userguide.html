@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="Transcriberator high-tech user guide with accessible navigation and release-ready workflow guidance." />
+  <title>Transcriberator User Guide</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #050816;
+      --panel: #0b1228;
+      --text: #dce6ff;
+      --muted: #9ab0ff;
+      --accent: #64f4ff;
+      --accent2: #9f7bff;
+      --ok: #7dffb0;
+      --warn: #ffd782;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, Segoe UI, Roboto, Arial, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 20% 20%, rgba(100, 244, 255, 0.12), transparent 30%),
+        radial-gradient(circle at 80% 0%, rgba(159, 123, 255, 0.18), transparent 30%),
+        var(--bg);
+      line-height: 1.6;
+    }
+    a { color: var(--accent); }
+    .skip-link {
+      position: absolute;
+      left: -9999px;
+      top: auto;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+    }
+    .skip-link:focus {
+      left: 1rem;
+      top: 1rem;
+      width: auto;
+      height: auto;
+      padding: 0.5rem 0.75rem;
+      background: #fff;
+      color: #000;
+      border-radius: 0.5rem;
+      z-index: 1000;
+    }
+    header, nav, main, footer { max-width: 960px; margin: 0 auto; padding: 1rem; }
+    header {
+      padding-top: 2rem;
+    }
+    .title {
+      margin: 0;
+      font-size: clamp(1.9rem, 4vw, 3rem);
+      letter-spacing: 0.04em;
+    }
+    .subtitle { color: var(--muted); max-width: 72ch; }
+    nav {
+      background: linear-gradient(120deg, rgba(100, 244, 255, 0.14), rgba(159, 123, 255, 0.12));
+      border: 1px solid rgba(154, 176, 255, 0.3);
+      border-radius: 1rem;
+      margin-top: 0.75rem;
+    }
+    nav ul {
+      margin: 0;
+      padding-left: 1rem;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 0.5rem;
+    }
+    section {
+      background: rgba(11, 18, 40, 0.85);
+      border: 1px solid rgba(154, 176, 255, 0.2);
+      border-radius: 1rem;
+      padding: 1rem 1.25rem;
+      margin: 1rem 0;
+      backdrop-filter: blur(2px);
+    }
+    h2 { margin-top: 0.2rem; color: var(--accent); }
+    .kpi { display: flex; gap: 1rem; flex-wrap: wrap; }
+    .pill {
+      border-radius: 999px;
+      padding: 0.2rem 0.7rem;
+      border: 1px solid currentColor;
+      font-size: 0.9rem;
+    }
+    .ok { color: var(--ok); }
+    .warn { color: var(--warn); }
+    code, pre {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: rgba(0, 0, 0, 0.25);
+      border-radius: 0.4rem;
+    }
+    code { padding: 0.1rem 0.35rem; }
+    pre { padding: 0.75rem; overflow-x: auto; }
+    footer { color: var(--muted); padding-bottom: 2rem; }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <header>
+    <h1 class="title">Transcriberator User Guide</h1>
+    <p class="subtitle">Accessible, release-ready guidance for running Draft/HQ pipelines, validating quality gates, and shipping with confidence.</p>
+    <div class="kpi" role="list" aria-label="Release indicators">
+      <span class="pill ok" role="listitem">Coverage policy: ≥95% branch</span>
+      <span class="pill ok" role="listitem">Regression status: deterministic test flow</span>
+      <span class="pill warn" role="listitem">Windows: follow dedicated local runbook</span>
+    </div>
+  </header>
+
+  <nav aria-label="Table of contents">
+    <ul>
+      <li><a href="#quick-start">Quick Start</a></li>
+      <li><a href="#modes">System Modes</a></li>
+      <li><a href="#workflow">End-to-End Workflow</a></li>
+      <li><a href="#observability">Observability & Quality</a></li>
+      <li><a href="#security">Security & Privacy</a></li>
+      <li><a href="#windows">Windows Local Runbook</a></li>
+      <li><a href="#troubleshooting">Troubleshooting</a></li>
+    </ul>
+  </nav>
+
+  <main id="main-content">
+    <section id="quick-start" aria-labelledby="quick-start-heading">
+      <h2 id="quick-start-heading">Quick Start</h2>
+      <ol>
+        <li>Upload <strong>MP3</strong>, <strong>WAV</strong>, or <strong>FLAC</strong>.</li>
+        <li>Select mode: <strong>Draft</strong> for speed, <strong>HQ</strong> for stronger processing quality.</li>
+        <li>Track per-stage progress in dashboard status rows.</li>
+        <li>Open editor views and apply note, timing, and revision controls.</li>
+        <li>Export and review generated artifacts.</li>
+      </ol>
+    </section>
+
+    <section id="modes" aria-labelledby="modes-heading">
+      <h2 id="modes-heading">System Modes</h2>
+      <p><strong>Draft:</strong> fastest deterministic pass for iteration loops.</p>
+      <p><strong>HQ:</strong> separation-aware path for stronger final quality with fallback semantics.</p>
+    </section>
+
+    <section id="workflow" aria-labelledby="workflow-heading">
+      <h2 id="workflow-heading">End-to-End Workflow</h2>
+      <ol>
+        <li>Create project and start job.</li>
+        <li>Monitor stage states and artifact generation.</li>
+        <li>Edit score and checkpoint revisions.</li>
+        <li>Review confidence and observability metrics.</li>
+        <li>Export production-ready artifacts.</li>
+      </ol>
+    </section>
+
+    <section id="observability" aria-labelledby="obs-heading">
+      <h2 id="obs-heading">Observability & Quality Signals</h2>
+      <ul>
+        <li>Retain deterministic status payloads for reproducible triage.</li>
+        <li>Use performance tests to protect interaction latency budgets.</li>
+        <li>Enforce coverage gate with branch-awareness before release.</li>
+      </ul>
+      <pre><code>pytest --cov=. --cov-branch --cov-report=term-missing --cov-fail-under=95</code></pre>
+    </section>
+
+    <section id="security" aria-labelledby="security-heading">
+      <h2 id="security-heading">Security & Privacy Controls</h2>
+      <ul>
+        <li>Authenticate by owner-scoped access token workflows.</li>
+        <li>Use signed artifact URL patterns.</li>
+        <li>Apply retention policies for retain/archive/delete outcomes.</li>
+      </ul>
+    </section>
+
+    <section id="windows" aria-labelledby="windows-heading">
+      <h2 id="windows-heading">Windows Local Runbook</h2>
+      <p>Follow <code>docs/runbooks/DT-016_Local_Dev_Windows_Runbook.md</code> end-to-end. Validation commands:</p>
+      <pre><code>py -m pip install pytest pytest-cov
+py -m pytest --cov=. --cov-branch --cov-report=term-missing --cov-fail-under=95</code></pre>
+    </section>
+
+    <section id="troubleshooting" aria-labelledby="troubleshooting-heading">
+      <h2 id="troubleshooting-heading">Troubleshooting</h2>
+      <ul>
+        <li>Import collision: ensure <code>--import-mode=importlib</code> is active.</li>
+        <li>Coverage below gate: add branch-complete tests before merging.</li>
+        <li>Windows shell variance: execute from repository root using <code>py -m ...</code>.</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer>
+    <p>Release gate reference: <code>docs/release/DT-025_Final_Regression_Coverage_Gate.md</code>.</p>
+  </footer>
+</body>
+</html>
