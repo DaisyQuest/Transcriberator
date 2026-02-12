@@ -97,3 +97,4 @@ Implementation checklist mirroring `Final_Spec.md`. Every item has a unique chec
 
 - [x] WC-TASK-012: Replace smoke-only local startup with an interactive dashboard server that accepts audio uploads for transcription, preserve smoke mode under explicit flagging, and expand branch-complete entrypoint tests/docs.
 - [x] WC-TASK-013: Improve local dashboard job UX to expose transcription output file paths, add raw output viewing/editing workflows, and enforce comprehensive entrypoint tests for new branches.
+- [x] WC-TASK-014: Ensure dashboard transcriptions publish visible sheet music artifacts (MusicXML/MIDI/PDF/PNG) with path/link access and exhaustive route/test coverage.

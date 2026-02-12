@@ -153,6 +153,37 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
         self.assertIn('- decode_normalize: succeeded (completed)', text)
         self.assertIn('Edit this text directly', text)
 
+    def test_build_sheet_artifacts_creates_expected_outputs(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            artifacts = self.module._build_sheet_artifacts(
+                job_id='job_123',
+                uploads_dir=Path(tmp),
+                audio_file='demo.wav',
+            )
+
+            self.assertEqual({artifact['name'] for artifact in artifacts}, {'musicxml', 'midi', 'pdf', 'png'})
+            for artifact in artifacts:
+                with self.subTest(name=artifact['name']):
+                    artifact_path = Path(artifact['path'])
+                    self.assertTrue(artifact_path.exists())
+                    self.assertEqual(artifact['downloadPath'], f"/outputs/artifact?job=job_123&name={artifact['name']}")
+
+    def test_augment_transcription_with_artifacts_appends_manifest(self):
+        output = self.module._augment_transcription_with_artifacts(
+            transcription_text='base content',
+            artifacts=[
+                {'name': 'musicxml', 'path': '/tmp/job.musicxml'},
+                {'name': 'pdf', 'path': '/tmp/job.pdf'},
+            ],
+        )
+
+        self.assertIn('base content', output)
+        self.assertIn('Generated sheet music artifacts', output)
+        self.assertIn('- musicxml: /tmp/job.musicxml', output)
+        self.assertIn('- pdf: /tmp/job.pdf', output)
+
 
 class TestDashboardServer(unittest.TestCase):
     @classmethod
@@ -288,6 +319,7 @@ class TestDashboardServer(unittest.TestCase):
                 timeout=2,
             ).read().decode('utf-8')
             self.assertIn('Transcription draft for demo.wav', output_text)
+            self.assertIn('Generated sheet music artifacts', output_text)
 
             edit_request = request.Request(
                 f'http://{host}:{port}/edit-transcription',
@@ -345,6 +377,88 @@ class TestDashboardServer(unittest.TestCase):
             with self.assertRaises(HTTPError) as raised:
                 request.urlopen(f'http://{host}:{port}/outputs/transcription?job=missing', timeout=2)
             self.assertEqual(raised.exception.code, 404)
+
+            thread.join(timeout=3)
+            self.assertFalse(thread.is_alive())
+
+    def test_dashboard_artifact_route_serves_artifact_and_404_paths(self):
+        holder = {}
+        original_server = self.module.ThreadingHTTPServer
+
+        class TestServer(original_server):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                holder['server'] = self
+
+            def serve_forever(self, poll_interval=0.5):
+                for _ in range(5):
+                    self.handle_request()
+
+        with mock.patch.object(self.module, 'ThreadingHTTPServer', TestServer):
+            thread = threading.Thread(
+                target=self.module.serve_dashboard,
+                kwargs={
+                    'config': self.module.DashboardServerConfig(
+                        host='127.0.0.1',
+                        port=0,
+                        owner_id='owner-a',
+                        mode='draft',
+                        allow_hq_degradation=True,
+                    )
+                },
+                daemon=True,
+            )
+            thread.start()
+
+            for _ in range(20):
+                if 'server' in holder:
+                    break
+                time.sleep(0.05)
+            self.assertIn('server', holder)
+
+            host, port = holder['server'].server_address
+
+            class NoRedirect(request.HTTPRedirectHandler):
+                def redirect_request(self, req, fp, code, msg, headers, newurl):
+                    return None
+
+            payload, boundary = build_multipart_body('demo.wav', b'RIFF', 'draft')
+            transcribe_request = request.Request(
+                f'http://{host}:{port}/transcribe',
+                data=payload,
+                method='POST',
+                headers={'Content-Type': f'multipart/form-data; boundary={boundary}'},
+            )
+            opener = request.build_opener(NoRedirect)
+            with self.assertRaises(HTTPError):
+                opener.open(transcribe_request, timeout=2)
+
+            page = request.urlopen(f'http://{host}:{port}/', timeout=2).read().decode('utf-8')
+            marker = '/outputs/transcription?job='
+            start = page.index(marker) + len(marker)
+            job_id_chars = []
+            for char in page[start:]:
+                if char in {'\'', '"', '&', '<'}:
+                    break
+                job_id_chars.append(char)
+            parsed_job_id = ''.join(job_id_chars)
+
+            artifact_body = request.urlopen(
+                f'http://{host}:{port}/outputs/artifact?job={parsed_job_id}&name=musicxml',
+                timeout=2,
+            ).read().decode('utf-8')
+            self.assertIn('<score-partwise version="4.0">', artifact_body)
+
+            with self.assertRaises(HTTPError) as missing_artifact:
+                request.urlopen(
+                    f'http://{host}:{port}/outputs/artifact?job={parsed_job_id}&name=missing',
+                    timeout=2,
+                )
+            self.assertEqual(missing_artifact.exception.code, 404)
+
+            with self.assertRaises(HTTPError) as missing_job:
+                request.urlopen(f'http://{host}:{port}/outputs/artifact?job=missing&name=musicxml', timeout=2)
+            self.assertEqual(missing_job.exception.code, 404)
 
             thread.join(timeout=3)
             self.assertFalse(thread.is_alive())
@@ -410,6 +524,13 @@ class TestDashboardServer(unittest.TestCase):
                     'submittedAtUtc': '2020-01-01T00:00:00+00:00',
                     'transcriptionPath': '/tmp/job_1_transcription.txt',
                     'transcriptionText': 'hello world',
+                    'sheetArtifacts': [
+                        {
+                            'name': 'musicxml',
+                            'path': '/tmp/job_1_demo.musicxml',
+                            'downloadPath': '/outputs/artifact?job=job_1&name=musicxml',
+                        }
+                    ],
                     'stages': [{'stage_name': 'decode_normalize', 'status': 'succeeded', 'detail': 'completed'}],
                 }
             ],
@@ -418,6 +539,7 @@ class TestDashboardServer(unittest.TestCase):
         self.assertIn('clip.wav', html_text)
         self.assertIn('done', html_text)
         self.assertIn('/outputs/transcription?job=job_1', html_text)
+        self.assertIn('/outputs/artifact?job=job_1&amp;name=musicxml', html_text)
         self.assertIn('hello world', html_text)
 
 
