@@ -81,3 +81,4 @@ Implementation checklist mirroring `Final_Spec.md`. Every item has a unique chec
 - [x] WC-TASK-004: Complete DT-004/DT-005/DT-006 shared contracts for Score IR, worker RPC envelopes, and orchestrator stage-state semantics with expanded validation tests.
 - [x] WC-TASK-005: Complete DT-010/DT-011/DT-012/DT-013/DT-014/DT-015 by adding orchestrator and pipeline worker runtime skeleton modules with deterministic behavior and high-coverage unit tests.
 - [x] WC-TASK-005: Complete DT-007/DT-008/DT-009 by adding dashboard-api, dashboard-ui, and editor-app skeletons with comprehensive branch coverage tests.
+- [x] WC-TASK-006: Complete DT-016 by publishing local-dev infrastructure bootstrap assets and a Windows-focused local runbook baseline with automated governance tests.
