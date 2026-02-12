@@ -760,26 +760,15 @@ def _derive_melody_pitches_from_pcm(
         if len(analysis_window) < 32:
             continue
 
-        zero_crossings = 0
-        previous_sign = analysis_window[0] >= 0
-        for value in analysis_window[1:]:
-            current_sign = value >= 0
-            if current_sign != previous_sign:
-                zero_crossings += 1
-            previous_sign = current_sign
-
-        if zero_crossings == 0:
+        inferred_pitch = _infer_segment_pitch_midi(analysis_window=analysis_window, sample_rate=sample_rate)
+        if inferred_pitch is None:
             continue
-
-        frequency_hz = (zero_crossings * sample_rate) / (2 * len(analysis_window))
-        if frequency_hz < 40 or frequency_hz > 2000:
-            continue
-
-        midi_pitch = int(round(69 + (12 * math.log2(frequency_hz / 440.0))))
-        melody.append(max(36, min(96, midi_pitch)))
+        melody.append(inferred_pitch)
 
     if not melody:
         return ()
+
+    melody = _smooth_detected_melody(melody=melody)
 
     target_count = min(1024, max(8, int(round(estimated_duration_seconds * max(1.0, estimated_tempo_bpm / 60.0)))))
     if len(melody) >= target_count:
@@ -789,6 +778,120 @@ def _derive_melody_pitches_from_pcm(
     while len(padded) < target_count:
         padded.append(melody[len(padded) % len(melody)])
     return tuple(padded)
+
+
+def _infer_segment_pitch_midi(*, analysis_window: list[int], sample_rate: int) -> int | None:
+    if len(analysis_window) < 32 or sample_rate <= 0:
+        return None
+
+    zero_crossing_frequency = _estimate_frequency_zero_crossing(analysis_window=analysis_window, sample_rate=sample_rate)
+    autocorrelation_frequency = _estimate_frequency_autocorrelation(analysis_window=analysis_window, sample_rate=sample_rate)
+
+    candidate_frequencies = [
+        frequency
+        for frequency in (zero_crossing_frequency, autocorrelation_frequency)
+        if frequency is not None and 40 <= frequency <= 2_000
+    ]
+    if not candidate_frequencies:
+        return None
+
+    if len(candidate_frequencies) == 2 and abs(candidate_frequencies[0] - candidate_frequencies[1]) <= 24:
+        frequency_hz = sum(candidate_frequencies) / len(candidate_frequencies)
+    elif autocorrelation_frequency is not None:
+        frequency_hz = autocorrelation_frequency
+    else:
+        frequency_hz = candidate_frequencies[0]
+
+    midi_pitch = int(round(69 + (12 * math.log2(frequency_hz / 440.0))))
+    return max(36, min(96, midi_pitch))
+
+
+def _estimate_frequency_zero_crossing(*, analysis_window: list[int], sample_rate: int) -> float | None:
+    zero_crossings = 0
+    previous_sign = analysis_window[0] >= 0
+    for value in analysis_window[1:]:
+        current_sign = value >= 0
+        if current_sign != previous_sign:
+            zero_crossings += 1
+        previous_sign = current_sign
+
+    if zero_crossings == 0:
+        return None
+
+    frequency_hz = (zero_crossings * sample_rate) / (2 * len(analysis_window))
+    if frequency_hz < 40 or frequency_hz > 2_000:
+        return None
+    return frequency_hz
+
+
+def _estimate_frequency_autocorrelation(*, analysis_window: list[int], sample_rate: int) -> float | None:
+    if len(analysis_window) < 64:
+        return None
+
+    centered = [value - (sum(analysis_window) / len(analysis_window)) for value in analysis_window]
+    energy = sum(sample * sample for sample in centered)
+    if energy <= 0:
+        return None
+
+    min_lag = max(2, int(sample_rate / 2_000))
+    max_lag = min(len(centered) // 2, int(sample_rate / 40))
+    if min_lag >= max_lag:
+        return None
+
+    lag_scores: list[tuple[int, float]] = []
+    for lag in range(min_lag, max_lag + 1):
+        overlap = len(centered) - lag
+        if overlap <= 0:
+            continue
+
+        numerator = 0.0
+        left_energy = 0.0
+        right_energy = 0.0
+        for index in range(overlap):
+            left = centered[index]
+            right = centered[index + lag]
+            numerator += left * right
+            left_energy += left * left
+            right_energy += right * right
+
+        denominator = math.sqrt(left_energy * right_energy)
+        if denominator <= 0:
+            continue
+        score = numerator / denominator
+        lag_scores.append((lag, score))
+
+    if not lag_scores:
+        return None
+
+    best_score = max(score for _, score in lag_scores)
+    if best_score < 0.25:
+        return None
+
+    viable_lags = [lag for lag, score in lag_scores if score >= (best_score * 0.9)]
+    if not viable_lags:
+        return None
+
+    best_lag = min(viable_lags)
+    frequency_hz = sample_rate / best_lag
+    if frequency_hz < 40 or frequency_hz > 2_000:
+        return None
+    return frequency_hz
+
+
+def _smooth_detected_melody(*, melody: list[int]) -> list[int]:
+    if len(melody) < 3:
+        return melody
+
+    smoothed = melody.copy()
+    for index in range(1, len(smoothed) - 1):
+        prior = smoothed[index - 1]
+        current = smoothed[index]
+        next_pitch = smoothed[index + 1]
+        neighborhood_center = int(round((prior + next_pitch) / 2))
+        if abs(current - neighborhood_center) >= 8:
+            smoothed[index] = neighborhood_center
+
+    return smoothed
 
 
 def _estimate_key(*, melody_pitches: tuple[int, ...], audio_bytes: bytes) -> str:
@@ -867,6 +970,8 @@ def _build_sheet_artifacts(
         "</score-partwise>\n"
     )
     _validate_musicxml_payload(musicxml_payload)
+
+    uploads_dir.mkdir(parents=True, exist_ok=True)
 
     artifact_specs = [
         (
