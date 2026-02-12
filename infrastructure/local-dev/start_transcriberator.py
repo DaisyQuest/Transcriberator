@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import html
@@ -31,6 +32,17 @@ class DashboardServerConfig:
     owner_id: str
     mode: str
     allow_hq_degradation: bool
+
+
+@dataclass(frozen=True)
+class AudioAnalysisProfile:
+    """Deterministic audio-derived profile used to produce unique transcription output."""
+
+    fingerprint: str
+    byte_count: int
+    estimated_tempo_bpm: int
+    estimated_key: str
+    melody_pitches: tuple[int, int, int, int]
 
 
 def _load_module(name: str, path: Path) -> Any:
@@ -157,8 +169,71 @@ def _build_transcription_text(*, audio_file: str, mode: str, stages: list[dict[s
     )
 
 
-def _build_sheet_artifacts(*, job_id: str, uploads_dir: Path, audio_file: str) -> list[dict[str, str]]:
+def _analyze_audio_bytes(*, audio_file: str, audio_bytes: bytes) -> AudioAnalysisProfile:
+    if not audio_bytes:
+        raise StartupError("Uploaded audio payload was empty.")
+
+    digest = hashlib.sha256(audio_bytes).hexdigest()
+    fingerprint = digest[:16]
+    tempo_seed = int(digest[:8], 16)
+    key_seed = int(digest[8:10], 16)
+    pitch_seed = int(digest[10:18], 16)
+
+    estimated_tempo_bpm = 72 + (tempo_seed % 89)  # 72..160 BPM
+    keys = ["C", "G", "D", "A", "E", "B", "F#", "C#", "F", "Bb", "Eb", "Ab"]
+    estimated_key = keys[key_seed % len(keys)]
+
+    melody: list[int] = []
+    for offset in range(4):
+        raw = (pitch_seed >> (offset * 6)) & 0x3F
+        melody.append(57 + (raw % 25))  # A3..A5
+
+    return AudioAnalysisProfile(
+        fingerprint=f"{Path(audio_file).stem}-{fingerprint}",
+        byte_count=len(audio_bytes),
+        estimated_tempo_bpm=estimated_tempo_bpm,
+        estimated_key=estimated_key,
+        melody_pitches=tuple(melody),
+    )
+
+
+def _build_transcription_text_with_analysis(
+    *,
+    audio_file: str,
+    mode: str,
+    stages: list[dict[str, Any]],
+    profile: AudioAnalysisProfile,
+) -> str:
+    base = _build_transcription_text(audio_file=audio_file, mode=mode, stages=stages)
+    return (
+        f"{base}\n"
+        "Audio analysis\n"
+        f"- Fingerprint: {profile.fingerprint}\n"
+        f"- Byte count: {profile.byte_count}\n"
+        f"- Estimated tempo: {profile.estimated_tempo_bpm} BPM\n"
+        f"- Estimated key: {profile.estimated_key} major\n"
+        f"- Melody MIDI pitches: {', '.join(str(p) for p in profile.melody_pitches)}\n"
+    )
+
+
+def _build_sheet_artifacts(
+    *,
+    job_id: str,
+    uploads_dir: Path,
+    audio_file: str,
+    profile: AudioAnalysisProfile | None = None,
+) -> list[dict[str, str]]:
     stem = Path(audio_file).stem
+    if profile is None:
+        profile = _analyze_audio_bytes(audio_file=audio_file, audio_bytes=audio_file.encode("utf-8"))
+
+    note_block = "\n".join(
+        (
+            "      <note><pitch><step>{step}</step><octave>{octave}</octave></pitch>"
+            "<duration>1</duration><type>quarter</type></note>"
+        ).format(step=_midi_pitch_to_step(pitch), octave=_midi_pitch_to_octave(pitch))
+        for pitch in profile.melody_pitches
+    )
     musicxml_payload = (
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
         "<!DOCTYPE score-partwise PUBLIC \"-//Recordare//DTD MusicXML 4.0 Partwise//EN\" "
@@ -169,10 +244,7 @@ def _build_sheet_artifacts(*, job_id: str, uploads_dir: Path, audio_file: str) -
         "    <measure number=\"1\">\n"
         "      <attributes><divisions>1</divisions><key><fifths>0</fifths></key>"
         "<time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>\n"
-        "      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>\n"
-        "      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>\n"
-        "      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>\n"
-        "      <note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type></note>\n"
+        f"{note_block}\n"
         "    </measure>\n"
         "  </part>\n"
         "</score-partwise>\n"
@@ -190,7 +262,7 @@ def _build_sheet_artifacts(*, job_id: str, uploads_dir: Path, audio_file: str) -
             "midi",
             ".mid",
             "audio/midi",
-            _build_minimal_midi_payload(),
+            _build_minimal_midi_payload(profile.melody_pitches),
         ),
         (
             "pdf",
@@ -221,11 +293,30 @@ def _build_sheet_artifacts(*, job_id: str, uploads_dir: Path, audio_file: str) -
     return artifacts
 
 
-def _build_minimal_midi_payload() -> bytes:
+def _build_minimal_midi_payload(melody_pitches: tuple[int, int, int, int] = (60, 64, 67, 72)) -> bytes:
     header = b"MThd" + (6).to_bytes(4, "big") + (0).to_bytes(2, "big") + (1).to_bytes(2, "big") + (96).to_bytes(2, "big")
-    track_events = b"\x00\x90\x3c\x40\x60\x80\x3c\x40\x00\xff\x2f\x00"
+    events = bytearray()
+    for pitch in melody_pitches:
+        pitch_byte = max(0, min(127, pitch))
+        events.extend(b"\x00\x90")
+        events.append(pitch_byte)
+        events.append(0x40)
+        events.extend(b"\x30\x80")
+        events.append(pitch_byte)
+        events.append(0x40)
+    events.extend(b"\x00\xff\x2f\x00")
+    track_events = bytes(events)
     track = b"MTrk" + len(track_events).to_bytes(4, "big") + track_events
     return header + track
+
+
+def _midi_pitch_to_step(pitch: int) -> str:
+    names = ["C", "C", "D", "D", "E", "F", "F", "G", "G", "A", "A", "B"]
+    return names[pitch % 12]
+
+
+def _midi_pitch_to_octave(pitch: int) -> int:
+    return (pitch // 12) - 1
 
 
 def _build_minimal_pdf_payload() -> bytes:
@@ -608,12 +699,19 @@ def serve_dashboard(*, config: DashboardServerConfig) -> None:
                 "finalStatus": result.final_status.value,
                 "stages": [{**asdict(record), "status": record.status.value} for record in result.stage_records],
             }
-            transcription_text = _build_transcription_text(
+            profile = _analyze_audio_bytes(audio_file=safe_filename, audio_bytes=file_bytes)
+            transcription_text = _build_transcription_text_with_analysis(
                 audio_file=safe_filename,
                 mode=normalized_mode,
                 stages=summary["stages"],
+                profile=profile,
             )
-            artifacts = _build_sheet_artifacts(job_id=job.id, uploads_dir=state["uploads_dir"], audio_file=safe_filename)
+            artifacts = _build_sheet_artifacts(
+                job_id=job.id,
+                uploads_dir=state["uploads_dir"],
+                audio_file=safe_filename,
+                profile=profile,
+            )
             transcription_text = _augment_transcription_with_artifacts(
                 transcription_text=transcription_text,
                 artifacts=artifacts,

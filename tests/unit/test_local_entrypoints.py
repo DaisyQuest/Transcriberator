@@ -155,12 +155,54 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
         self.assertIn('- decode_normalize: succeeded (completed)', text)
         self.assertIn('Edit this text directly', text)
 
+    def test_analyze_audio_bytes_is_deterministic_and_input_specific(self):
+        profile_a = self.module._analyze_audio_bytes(audio_file='first.mp3', audio_bytes=b'ID3\x00\x01')
+        profile_a_repeat = self.module._analyze_audio_bytes(audio_file='first.mp3', audio_bytes=b'ID3\x00\x01')
+        profile_b = self.module._analyze_audio_bytes(audio_file='second.mp3', audio_bytes=b'ID3\x00\x02')
+
+        self.assertEqual(profile_a, profile_a_repeat)
+        self.assertNotEqual(profile_a.fingerprint, profile_b.fingerprint)
+        self.assertNotEqual(profile_a.melody_pitches, profile_b.melody_pitches)
+
+    def test_analyze_audio_bytes_rejects_empty_payload(self):
+        with self.assertRaisesRegex(self.module.StartupError, 'Uploaded audio payload was empty'):
+            self.module._analyze_audio_bytes(audio_file='empty.mp3', audio_bytes=b'')
+
+    def test_build_transcription_text_with_analysis_includes_audio_profile(self):
+        profile = self.module.AudioAnalysisProfile(
+            fingerprint='demo-abc123',
+            byte_count=128,
+            estimated_tempo_bpm=120,
+            estimated_key='D',
+            melody_pitches=(60, 62, 64, 65),
+        )
+        text = self.module._build_transcription_text_with_analysis(
+            audio_file='clip.mp3',
+            mode='draft',
+            stages=[{'stage_name': 'transcription', 'status': 'succeeded', 'detail': 'completed'}],
+            profile=profile,
+        )
+
+        self.assertIn('Audio analysis', text)
+        self.assertIn('Fingerprint: demo-abc123', text)
+        self.assertIn('Estimated tempo: 120 BPM', text)
+        self.assertIn('Estimated key: D major', text)
+        self.assertIn('Melody MIDI pitches: 60, 62, 64, 65', text)
+
     def test_build_sheet_artifacts_creates_expected_outputs(self):
         with tempfile.TemporaryDirectory() as tmp:
+            profile = self.module.AudioAnalysisProfile(
+                fingerprint='demo-fingerprint',
+                byte_count=256,
+                estimated_tempo_bpm=108,
+                estimated_key='A',
+                melody_pitches=(61, 63, 66, 68),
+            )
             artifacts = self.module._build_sheet_artifacts(
                 job_id='job_123',
                 uploads_dir=Path(tmp),
                 audio_file='demo.wav',
+                profile=profile,
             )
 
             self.assertEqual({artifact['name'] for artifact in artifacts}, {'musicxml', 'midi', 'pdf', 'png'})
@@ -169,6 +211,10 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
                     artifact_path = Path(artifact['path'])
                     self.assertTrue(artifact_path.exists())
                     self.assertEqual(artifact['downloadPath'], f"/outputs/artifact?job=job_123&name={artifact['name']}")
+
+            musicxml_payload = Path(next(a['path'] for a in artifacts if a['name'] == 'musicxml')).read_text(encoding='utf-8')
+            self.assertIn('<step>C</step><octave>4</octave>', musicxml_payload)
+            self.assertIn('<step>D</step><octave>4</octave>', musicxml_payload)
 
 
 
@@ -181,6 +227,14 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
         self.assertIsNone(self.module._validate_pdf_payload(pdf))
         self.assertIsNone(self.module._validate_png_payload(png))
         self.assertIsNone(self.module._validate_artifact_payload(artifact_name='musicxml', payload=b'<xml/>'))
+
+    def test_midi_payload_builder_is_melody_specific(self):
+        midi_a = self.module._build_minimal_midi_payload((60, 62, 64, 65))
+        midi_b = self.module._build_minimal_midi_payload((67, 69, 71, 72))
+
+        self.assertNotEqual(midi_a, midi_b)
+        self.assertIsNone(self.module._validate_midi_payload(midi_a))
+        self.assertIsNone(self.module._validate_midi_payload(midi_b))
 
     def test_musicxml_payload_validation_success_and_failure(self):
         valid_xml = '<?xml version="1.0"?><score-partwise version="4.0"></score-partwise>'
