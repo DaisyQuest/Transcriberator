@@ -17,6 +17,7 @@ import tempfile
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 import uuid
+import xml.etree.ElementTree as ET
 
 
 class StartupError(RuntimeError):
@@ -158,54 +159,57 @@ def _build_transcription_text(*, audio_file: str, mode: str, stages: list[dict[s
 
 def _build_sheet_artifacts(*, job_id: str, uploads_dir: Path, audio_file: str) -> list[dict[str, str]]:
     stem = Path(audio_file).stem
+    musicxml_payload = (
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<!DOCTYPE score-partwise PUBLIC \"-//Recordare//DTD MusicXML 4.0 Partwise//EN\" "
+        "\"http://www.musicxml.org/dtds/partwise.dtd\">\n"
+        "<score-partwise version=\"4.0\">\n"
+        "  <part-list><score-part id=\"P1\"><part-name>Transcription</part-name></score-part></part-list>\n"
+        "  <part id=\"P1\">\n"
+        "    <measure number=\"1\">\n"
+        "      <attributes><divisions>1</divisions><key><fifths>0</fifths></key>"
+        "<time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>\n"
+        "      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>\n"
+        "      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>\n"
+        "      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>\n"
+        "      <note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type></note>\n"
+        "    </measure>\n"
+        "  </part>\n"
+        "</score-partwise>\n"
+    )
+    _validate_musicxml_payload(musicxml_payload)
+
     artifact_specs = [
         (
             "musicxml",
             ".musicxml",
             "application/vnd.recordare.musicxml+xml",
-            (
-                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-                "<!DOCTYPE score-partwise PUBLIC \"-//Recordare//DTD MusicXML 4.0 Partwise//EN\" "
-                "\"http://www.musicxml.org/dtds/partwise.dtd\">\n"
-                "<score-partwise version=\"4.0\">\n"
-                "  <part-list><score-part id=\"P1\"><part-name>Transcription</part-name></score-part></part-list>\n"
-                "  <part id=\"P1\">\n"
-                "    <measure number=\"1\">\n"
-                "      <attributes><divisions>1</divisions><key><fifths>0</fifths></key>"
-                "<time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>\n"
-                "      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>\n"
-                "      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>\n"
-                "      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>\n"
-                "      <note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type></note>\n"
-                "    </measure>\n"
-                "  </part>\n"
-                "</score-partwise>\n"
-            ),
+            musicxml_payload.encode("utf-8"),
         ),
         (
             "midi",
             ".mid",
             "audio/midi",
-            "MIDI placeholder: open this artifact in a DAW for local validation.\n",
+            _build_minimal_midi_payload(),
         ),
         (
             "pdf",
             ".pdf",
             "application/pdf",
-            "%PDF-1.4\n% Transcriberator local placeholder score export\n",
+            _build_minimal_pdf_payload(),
         ),
         (
             "png",
             ".png",
             "image/png",
-            "PNG placeholder: score preview generated locally.\n",
+            _build_minimal_png_payload(),
         ),
     ]
 
     artifacts: list[dict[str, str]] = []
     for artifact_name, extension, content_type, content in artifact_specs:
         artifact_path = uploads_dir / f"{job_id}_{stem}{extension}"
-        artifact_path.write_text(content, encoding="utf-8")
+        artifact_path.write_bytes(content)
         artifacts.append(
             {
                 "name": artifact_name,
@@ -215,6 +219,90 @@ def _build_sheet_artifacts(*, job_id: str, uploads_dir: Path, audio_file: str) -
             }
         )
     return artifacts
+
+
+def _build_minimal_midi_payload() -> bytes:
+    header = b"MThd" + (6).to_bytes(4, "big") + (0).to_bytes(2, "big") + (1).to_bytes(2, "big") + (96).to_bytes(2, "big")
+    track_events = b"\x00\x90\x3c\x40\x60\x80\x3c\x40\x00\xff\x2f\x00"
+    track = b"MTrk" + len(track_events).to_bytes(4, "big") + track_events
+    return header + track
+
+
+def _build_minimal_pdf_payload() -> bytes:
+    return (
+        b"%PDF-1.1\n"
+        b"1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+        b"2 0 obj<</Type/Pages/Count 1/Kids[3 0 R]>>endobj\n"
+        b"3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Contents 4 0 R>>endobj\n"
+        b"4 0 obj<</Length 36>>stream\nBT /F1 12 Tf 72 120 Td (Transcriberator) Tj ET\nendstream endobj\n"
+        b"xref\n0 5\n0000000000 65535 f \n"
+        b"0000000010 00000 n \n0000000062 00000 n \n0000000116 00000 n \n0000000203 00000 n \n"
+        b"trailer<</Root 1 0 R/Size 5>>\nstartxref\n289\n%%EOF"
+    )
+
+
+def _build_minimal_png_payload() -> bytes:
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        b"\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde"
+        b"\x00\x00\x00\x0cIDAT\x08\x1dc````\x00\x00\x00\x04\x00\x01\xf6\x178U"
+        b"\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+
+
+def _validate_musicxml_payload(payload: str) -> None:
+    ET.fromstring(payload)
+
+
+def _validate_midi_payload(payload: bytes) -> str | None:
+    if not payload.startswith(b"MThd"):
+        return "MIDI payload missing MThd header chunk."
+    if len(payload) < 14:
+        return "MIDI payload is too short to include a complete header."
+    header_len = int.from_bytes(payload[4:8], "big")
+    if header_len != 6:
+        return "MIDI header chunk length must be exactly 6 bytes."
+    track_offset = 8 + header_len
+    if len(payload) < track_offset + 8:
+        return "MIDI payload missing required track chunk header."
+    if payload[track_offset:track_offset + 4] != b"MTrk":
+        return "MIDI payload missing MTrk track chunk."
+    declared_track_len = int.from_bytes(payload[track_offset + 4:track_offset + 8], "big")
+    actual_track_len = len(payload) - (track_offset + 8)
+    if declared_track_len != actual_track_len:
+        return "MIDI track chunk length does not match payload size."
+    return None
+
+
+def _validate_pdf_payload(payload: bytes) -> str | None:
+    if not payload.startswith(b"%PDF-"):
+        return "PDF payload missing %PDF- header."
+    if b"%%EOF" not in payload.rstrip():
+        return "PDF payload missing %%EOF trailer."
+    return None
+
+
+def _validate_png_payload(payload: bytes) -> str | None:
+    if not payload.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "PNG payload missing standard signature bytes."
+    if not payload.endswith(b"IEND\xaeB`\x82"):
+        return "PNG payload missing IEND trailer chunk."
+    return None
+
+
+def _validate_artifact_payload(*, artifact_name: str, payload: bytes) -> str | None:
+    if artifact_name == "midi":
+        return _validate_midi_payload(payload)
+    if artifact_name == "pdf":
+        return _validate_pdf_payload(payload)
+    if artifact_name == "png":
+        return _validate_png_payload(payload)
+    return None
+
+
+def _content_disposition_for_artifact(artifact_name: str, artifact_path: Path) -> str:
+    mode = "inline" if artifact_name in {"pdf", "png"} else "attachment"
+    return f'{mode}; filename="{artifact_path.name}"'
 
 
 def _augment_transcription_with_artifacts(*, transcription_text: str, artifacts: list[dict[str, str]]) -> str:
@@ -392,9 +480,18 @@ def serve_dashboard(*, config: DashboardServerConfig) -> None:
                 self.send_error(HTTPStatus.NOT_FOUND, "Artifact file missing")
                 return
 
-            payload = artifact_path.read_text(encoding="utf-8").encode("utf-8")
+            payload = artifact_path.read_bytes()
+            validation_error = _validate_artifact_payload(artifact_name=artifact_name, payload=payload)
+            if validation_error:
+                self.send_error(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    f"Artifact validation failed for '{artifact_name}': {validation_error}",
+                )
+                return
+
             self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", f"{artifact['contentType']}; charset=utf-8")
+            self.send_header("Content-Type", artifact["contentType"])
+            self.send_header("Content-Disposition", _content_disposition_for_artifact(artifact_name, artifact_path))
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)

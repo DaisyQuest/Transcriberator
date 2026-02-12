@@ -99,3 +99,5 @@ Implementation checklist mirroring `Final_Spec.md`. Every item has a unique chec
 - [x] WC-TASK-013: Improve local dashboard job UX to expose transcription output file paths, add raw output viewing/editing workflows, and enforce comprehensive entrypoint tests for new branches.
 - [x] WC-TASK-014: Ensure dashboard transcriptions publish visible sheet music artifacts (MusicXML/MIDI/PDF/PNG) with path/link access and exhaustive route/test coverage.
 - [x] WC-TASK-015: Investigate broken artifact usability reports (PNG/PDF/MIDI and "neon"), map remediation to task dependencies, and publish `FIX_PLAN.md` with exhaustive testing/coverage strategy.
+- [x] WC-TASK-016: Execute FIX_PLAN Phase A by generating valid local binary artifacts (MIDI/PDF/PNG), adding binary-safe artifact serving + validation, and expanding exhaustive artifact branch tests.
+

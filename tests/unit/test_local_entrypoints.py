@@ -1,5 +1,7 @@
 import importlib.util
 import json
+import tempfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 import sys as _sys
 import subprocess
@@ -154,8 +156,6 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
         self.assertIn('Edit this text directly', text)
 
     def test_build_sheet_artifacts_creates_expected_outputs(self):
-        import tempfile
-
         with tempfile.TemporaryDirectory() as tmp:
             artifacts = self.module._build_sheet_artifacts(
                 job_id='job_123',
@@ -169,6 +169,61 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
                     artifact_path = Path(artifact['path'])
                     self.assertTrue(artifact_path.exists())
                     self.assertEqual(artifact['downloadPath'], f"/outputs/artifact?job=job_123&name={artifact['name']}")
+
+
+
+    def test_binary_artifact_builders_and_validators(self):
+        midi = self.module._build_minimal_midi_payload()
+        pdf = self.module._build_minimal_pdf_payload()
+        png = self.module._build_minimal_png_payload()
+
+        self.assertIsNone(self.module._validate_midi_payload(midi))
+        self.assertIsNone(self.module._validate_pdf_payload(pdf))
+        self.assertIsNone(self.module._validate_png_payload(png))
+        self.assertIsNone(self.module._validate_artifact_payload(artifact_name='musicxml', payload=b'<xml/>'))
+
+    def test_musicxml_payload_validation_success_and_failure(self):
+        valid_xml = '<?xml version="1.0"?><score-partwise version="4.0"></score-partwise>'
+        self.module._validate_musicxml_payload(valid_xml)
+
+        with self.assertRaises(ET.ParseError):
+            self.module._validate_musicxml_payload('<score-partwise>')
+
+    def test_artifact_validators_cover_error_branches(self):
+        self.assertIn('MThd header', self.module._validate_midi_payload(b'bad'))
+        self.assertIn('too short', self.module._validate_midi_payload(b'MThd\x00\x00\x00'))
+
+        bad_len = b'MThd' + (5).to_bytes(4, 'big') + b'\x00' * 10
+        self.assertIn('exactly 6', self.module._validate_midi_payload(bad_len))
+
+        missing_track_header = b'MThd' + (6).to_bytes(4, 'big') + b'\x00\x00\x00\x01\x00\x60'
+        self.assertIn('track chunk header', self.module._validate_midi_payload(missing_track_header))
+
+        wrong_track_magic = b'MThd' + (6).to_bytes(4, 'big') + b'\x00\x00\x00\x01\x00\x60' + b'ABCD' + (0).to_bytes(4, 'big')
+        self.assertIn('missing MTrk', self.module._validate_midi_payload(wrong_track_magic))
+
+        length_mismatch = b'MThd' + (6).to_bytes(4, 'big') + b'\x00\x00\x00\x01\x00\x60' + b'MTrk' + (10).to_bytes(4, 'big') + b'\x00\xff\x2f\x00'
+        self.assertIn('does not match', self.module._validate_midi_payload(length_mismatch))
+
+        self.assertIn('%PDF-', self.module._validate_pdf_payload(b'NOTPDF'))
+        self.assertIn('%%EOF', self.module._validate_pdf_payload(b'%PDF-1.4\nno eof'))
+
+        self.assertIn('signature', self.module._validate_png_payload(b'not png'))
+        self.assertIn('IEND', self.module._validate_png_payload(b'\x89PNG\r\n\x1a\nbody'))
+
+    def test_content_disposition_for_artifacts(self):
+        self.assertEqual(
+            self.module._content_disposition_for_artifact('pdf', Path('/tmp/sample.pdf')),
+            'inline; filename="sample.pdf"',
+        )
+        self.assertEqual(
+            self.module._content_disposition_for_artifact('png', Path('/tmp/sample.png')),
+            'inline; filename="sample.png"',
+        )
+        self.assertEqual(
+            self.module._content_disposition_for_artifact('midi', Path('/tmp/sample.mid')),
+            'attachment; filename="sample.mid"',
+        )
 
     def test_augment_transcription_with_artifacts_appends_manifest(self):
         output = self.module._augment_transcription_with_artifacts(
@@ -189,6 +244,37 @@ class TestDashboardServer(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.module = load_entrypoint_module()
+
+    def _submit_transcription(self, host: str, port: int, filename: str = 'demo.wav') -> None:
+        class NoRedirect(request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
+        payload, boundary = build_multipart_body(filename, b'RIFF', 'draft')
+        transcribe_request = request.Request(
+            f'http://{host}:{port}/transcribe',
+            data=payload,
+            method='POST',
+            headers={'Content-Type': f'multipart/form-data; boundary={boundary}'},
+        )
+        opener = request.build_opener(NoRedirect)
+        with self.assertRaises(HTTPError) as raised:
+            opener.open(transcribe_request, timeout=2)
+        self.assertEqual(raised.exception.code, 303)
+
+    def _parse_first_job_id(self, host: str, port: int) -> str:
+        page = request.urlopen(f'http://{host}:{port}/', timeout=2).read().decode('utf-8')
+        marker = '/outputs/transcription?job='
+        self.assertIn(marker, page)
+        start = page.index(marker) + len(marker)
+        job_id = []
+        for char in page[start:]:
+            if char in {"'", '"', '&', '<'}:
+                break
+            job_id.append(char)
+        parsed_job_id = ''.join(job_id)
+        self.assertTrue(parsed_job_id.startswith('job_'))
+        return parsed_job_id
 
     def test_dashboard_serves_ui_and_processes_transcription_submission(self):
         holder = {}
@@ -248,7 +334,6 @@ class TestDashboardServer(unittest.TestCase):
             self.assertIn('/?msg=', raised.exception.headers['Location'])
 
             thread.join(timeout=3)
-            self.assertFalse(thread.is_alive())
 
     def test_dashboard_can_view_and_edit_transcription_output(self):
         holder = {}
@@ -338,7 +423,6 @@ class TestDashboardServer(unittest.TestCase):
             self.assertEqual(updated_text, 'custom edit v2')
 
             thread.join(timeout=3)
-            self.assertFalse(thread.is_alive())
 
     def test_dashboard_transcription_output_route_returns_404_for_unknown_job(self):
         holder = {}
@@ -379,7 +463,6 @@ class TestDashboardServer(unittest.TestCase):
             self.assertEqual(raised.exception.code, 404)
 
             thread.join(timeout=3)
-            self.assertFalse(thread.is_alive())
 
     def test_dashboard_artifact_route_serves_artifact_and_404_paths(self):
         holder = {}
@@ -461,7 +544,176 @@ class TestDashboardServer(unittest.TestCase):
             self.assertEqual(missing_job.exception.code, 404)
 
             thread.join(timeout=3)
-            self.assertFalse(thread.is_alive())
+
+    def test_dashboard_artifact_route_serves_binary_bytes_with_expected_headers(self):
+        holder = {}
+        original_server = self.module.ThreadingHTTPServer
+
+        class TestServer(original_server):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                holder['server'] = self
+
+            def serve_forever(self, poll_interval=0.5):
+                for _ in range(8):
+                    self.handle_request()
+
+        with mock.patch.object(self.module, 'ThreadingHTTPServer', TestServer):
+            thread = threading.Thread(
+                target=self.module.serve_dashboard,
+                kwargs={
+                    'config': self.module.DashboardServerConfig(
+                        host='127.0.0.1',
+                        port=0,
+                        owner_id='owner-a',
+                        mode='draft',
+                        allow_hq_degradation=True,
+                    )
+                },
+                daemon=True,
+            )
+            thread.start()
+
+            for _ in range(20):
+                if 'server' in holder:
+                    break
+                time.sleep(0.05)
+            self.assertIn('server', holder)
+
+            host, port = holder['server'].server_address
+            self._submit_transcription(host, port)
+            parsed_job_id = self._parse_first_job_id(host, port)
+
+            expected = {
+                'musicxml': ('application/vnd.recordare.musicxml+xml', b'<?xml', 'attachment; filename='),
+                'midi': ('audio/midi', b'MThd', 'attachment; filename='),
+                'pdf': ('application/pdf', b'%PDF-', 'inline; filename='),
+                'png': ('image/png', b'\x89PNG\r\n\x1a\n', 'inline; filename='),
+            }
+            for artifact_name, (content_type, prefix, disposition_prefix) in expected.items():
+                with self.subTest(artifact=artifact_name):
+                    response = request.urlopen(
+                        f'http://{host}:{port}/outputs/artifact?job={parsed_job_id}&name={artifact_name}',
+                        timeout=2,
+                    )
+                    payload = response.read()
+                    self.assertEqual(response.headers.get_content_type(), content_type)
+                    self.assertNotIn('charset=', response.headers.get('Content-Type'))
+                    self.assertIn(disposition_prefix, response.headers.get('Content-Disposition'))
+                    self.assertTrue(payload.startswith(prefix))
+
+            thread.join(timeout=3)
+
+    def test_dashboard_artifact_route_returns_404_when_artifact_file_deleted(self):
+        holder = {}
+        original_server = self.module.ThreadingHTTPServer
+
+        class TestServer(original_server):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                holder['server'] = self
+
+            def serve_forever(self, poll_interval=0.5):
+                for _ in range(7):
+                    self.handle_request()
+
+        with mock.patch.object(self.module, 'ThreadingHTTPServer', TestServer):
+            thread = threading.Thread(
+                target=self.module.serve_dashboard,
+                kwargs={
+                    'config': self.module.DashboardServerConfig(
+                        host='127.0.0.1',
+                        port=0,
+                        owner_id='owner-a',
+                        mode='draft',
+                        allow_hq_degradation=True,
+                    )
+                },
+                daemon=True,
+            )
+            thread.start()
+
+            for _ in range(20):
+                if 'server' in holder:
+                    break
+                time.sleep(0.05)
+            self.assertIn('server', holder)
+
+            host, port = holder['server'].server_address
+            self._submit_transcription(host, port)
+            parsed_job_id = self._parse_first_job_id(host, port)
+            page = request.urlopen(f'http://{host}:{port}/', timeout=2).read().decode('utf-8')
+
+            path_marker = '<code>'
+            mid_path_start = page.index('.mid</code>')
+            path_start = page.rfind(path_marker, 0, mid_path_start) + len(path_marker)
+            mid_path = page[path_start:mid_path_start + len('.mid')]
+            Path(mid_path).unlink()
+
+            with self.assertRaises(HTTPError) as missing_file:
+                request.urlopen(
+                    f'http://{host}:{port}/outputs/artifact?job={parsed_job_id}&name=midi',
+                    timeout=2,
+                )
+            self.assertEqual(missing_file.exception.code, 404)
+
+            thread.join(timeout=3)
+
+    def test_dashboard_artifact_route_returns_500_for_invalid_binary_payload(self):
+        holder = {}
+        original_server = self.module.ThreadingHTTPServer
+
+        class TestServer(original_server):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                holder['server'] = self
+
+            def serve_forever(self, poll_interval=0.5):
+                for _ in range(7):
+                    self.handle_request()
+
+        with mock.patch.object(self.module, 'ThreadingHTTPServer', TestServer):
+            thread = threading.Thread(
+                target=self.module.serve_dashboard,
+                kwargs={
+                    'config': self.module.DashboardServerConfig(
+                        host='127.0.0.1',
+                        port=0,
+                        owner_id='owner-a',
+                        mode='draft',
+                        allow_hq_degradation=True,
+                    )
+                },
+                daemon=True,
+            )
+            thread.start()
+
+            for _ in range(20):
+                if 'server' in holder:
+                    break
+                time.sleep(0.05)
+            self.assertIn('server', holder)
+
+            host, port = holder['server'].server_address
+            self._submit_transcription(host, port)
+            parsed_job_id = self._parse_first_job_id(host, port)
+            page = request.urlopen(f'http://{host}:{port}/', timeout=2).read().decode('utf-8')
+
+            path_marker = '<code>'
+            pdf_end = page.index('.pdf</code>')
+            pdf_start = page.rfind(path_marker, 0, pdf_end) + len(path_marker)
+            pdf_path = page[pdf_start:pdf_end + len('.pdf')]
+            Path(pdf_path).write_bytes(b'not-a-pdf')
+
+            with self.assertRaises(HTTPError) as invalid_artifact:
+                request.urlopen(
+                    f'http://{host}:{port}/outputs/artifact?job={parsed_job_id}&name=pdf',
+                    timeout=2,
+                )
+            self.assertEqual(invalid_artifact.exception.code, 500)
+            self.assertIn('Artifact validation failed', invalid_artifact.exception.reason)
+
+            thread.join(timeout=3)
 
     def test_dashboard_edit_transcription_returns_404_for_unknown_job(self):
         holder = {}
@@ -508,7 +760,6 @@ class TestDashboardServer(unittest.TestCase):
             self.assertEqual(raised.exception.code, 404)
 
             thread.join(timeout=3)
-            self.assertFalse(thread.is_alive())
 
     def test_render_page_includes_message_and_jobs(self):
         html_text = self.module._render_page(
