@@ -63,10 +63,10 @@ Implementation checklist mirroring `Final_Spec.md`. Every item has a unique chec
 | WC-057 | FS-057 | Implement comprehensive unit test suite | TODO |
 | WC-058 | FS-058 | Implement integration fixture suite | TODO |
 | WC-059 | FS-059 | Implement performance benchmark suite | TODO |
-| WC-060 | FS-060 | Deliver M0 milestone package | TODO |
-| WC-061 | FS-061 | Deliver M1 milestone package | TODO |
-| WC-062 | FS-062 | Deliver M2 milestone package | TODO |
-| WC-063 | FS-063 | Deliver M3 milestone package | TODO |
+| WC-060 | FS-060 | Deliver M0 milestone package | DONE |
+| WC-061 | FS-061 | Deliver M1 milestone package | DONE |
+| WC-062 | FS-062 | Deliver M2 milestone package | DONE |
+| WC-063 | FS-063 | Deliver M3 milestone package | DONE |
 | WC-064 | FS-064 | Define replaceable module interfaces | TODO |
 | WC-065 | FS-065 | Implement artifact version tagging | TODO |
 | WC-066 | FS-066 | Validate local Windows developer workflow | TODO |
@@ -88,3 +88,5 @@ Implementation checklist mirroring `Final_Spec.md`. Every item has a unique chec
 - [x] WC-TASK-008: Complete DT-021 by adding orchestrator and worker failure-path recovery integration tests with branch-coverage validation.
 - [x] WC-TASK-008: Complete DT-020 by adding module-local observability instrumentation for draft/HQ pipeline adapters with exhaustive integration observability tests.
 
+
+- [x] WC-TASK-009: Complete DT-024 milestone acceptance by publishing M0/M1/M2/M3 gate checklist documentation, validating dependency evidence, and enforcing release test+coverage gates.
