@@ -8,6 +8,7 @@ This folder hosts infrastructure-facing assets that define the local development
 - `bootstrap.sh`: Bash bootstrap helper for Unix-like systems.
 - `env.example`: canonical environment variable template for local development.
 - `start_transcriberator.py`: canonical cross-platform Python startup entrypoint.
+- `dashboard_settings.json`: predictable default tuning configuration loaded by the local dashboard settings panel.
 
 ## Usage
 
@@ -47,6 +48,8 @@ python infrastructure/local-dev/start_transcriberator.py
 ```
 
 Use `--smoke-run --json` for machine-readable one-shot validation and `--smoke-run --fail-stage <stage-name>` for startup troubleshooting drills.
+
+Use `--settings-path infrastructure/local-dev/dashboard_settings.json` (default) to point the dashboard to a predictable settings file for pitch/chord tuning defaults.
 
 ## Guardrails
 

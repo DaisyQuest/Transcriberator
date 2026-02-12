@@ -79,6 +79,40 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
                 with self.assertRaises(self.module.StartupError):
                     self.module._validate_audio_filename(invalid)
 
+    def test_load_dashboard_tuning_defaults_reads_predictable_file(self):
+        settings = self.module._load_dashboard_tuning_defaults(
+            path=REPO_ROOT / 'infrastructure' / 'local-dev' / 'dashboard_settings.json'
+        )
+        self.assertEqual(settings.rms_gate, 5.0)
+        self.assertEqual(settings.min_frequency_hz, 40)
+        self.assertEqual(settings.max_frequency_hz, 2000)
+        self.assertEqual(settings.pitch_floor_midi, 36)
+        self.assertEqual(settings.pitch_ceiling_midi, 96)
+
+    def test_load_dashboard_tuning_defaults_handles_invalid_payload(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bad_path = Path(temp_dir) / 'settings.json'
+            bad_path.write_text('{"tuning": "bad"}', encoding='utf-8')
+            settings = self.module._load_dashboard_tuning_defaults(path=bad_path)
+        self.assertEqual(settings, self.module.DashboardTuningSettings())
+
+    def test_normalize_tuning_settings_clamps_and_reorders_ranges(self):
+        settings = self.module._normalize_tuning_settings(
+            {
+                'rmsGate': -5,
+                'minFrequencyHz': 5000,
+                'maxFrequencyHz': 30,
+                'frequencyClusterToleranceHz': 500,
+                'pitchFloorMidi': 120,
+                'pitchCeilingMidi': 20,
+            }
+        )
+        self.assertGreaterEqual(settings.rms_gate, 0.1)
+        self.assertLessEqual(settings.rms_gate, 100.0)
+        self.assertLessEqual(settings.min_frequency_hz, settings.max_frequency_hz)
+        self.assertLessEqual(settings.pitch_floor_midi, settings.pitch_ceiling_midi)
+        self.assertEqual(settings.frequency_cluster_tolerance_hz, 200.0)
+
     def test_run_startup_supports_draft_flow(self):
         summary = self.module.run_startup(mode='draft', owner_id='owner-a', project_name='Draft Smoke')
         self.assertEqual(summary['mode'], 'draft')
@@ -116,6 +150,7 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
         self.assertFalse(args.smoke_run)
         self.assertEqual(args.port, 4173)
         self.assertEqual(args.editor_url, 'http://127.0.0.1:3000')
+        self.assertEqual(args.settings_path, 'infrastructure/local-dev/dashboard_settings.json')
 
     def test_main_smoke_success_and_error_paths(self):
         self.assertEqual(self.module.main(['--smoke-run', '--json']), 0)
@@ -140,6 +175,7 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
         self.assertEqual(config.mode, 'hq')
         self.assertEqual(config.host, '0.0.0.0')
         self.assertEqual(config.port, 5123)
+        self.assertEqual(config.settings_path, 'infrastructure/local-dev/dashboard_settings.json')
 
     def test_format_summary_includes_stage_rows(self):
         summary = self.module.run_startup(mode='draft', owner_id='owner-a', project_name='Summary')
@@ -548,6 +584,47 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
         with self.assertRaisesRegex(self.module.StartupError, 'Uploaded audio payload was empty'):
             self.module._analyze_audio_bytes(audio_file='empty.mp3', audio_bytes=b'')
 
+    def test_build_reasoning_trace_handles_empty_melody(self):
+        trace = self.module._build_reasoning_trace(
+            melody=(),
+            estimated_tempo_bpm=120,
+            estimated_key='C',
+            tuning_settings=self.module.DashboardTuningSettings(),
+        )
+        self.assertEqual(len(trace), 2)
+        self.assertIn('No melodic events were detected', trace[0])
+        self.assertIn('RMS gate', trace[1])
+
+    def test_build_reasoning_trace_populated_melody(self):
+        trace = self.module._build_reasoning_trace(
+            melody=(60, 62, 64, 65, 67, 69, 71, 72),
+            estimated_tempo_bpm=124,
+            estimated_key='C',
+            tuning_settings=self.module.DashboardTuningSettings(rms_gate=7.5),
+        )
+        self.assertEqual(len(trace), 4)
+        self.assertIn('Tuning: RMS gate=7.5', trace[0])
+        self.assertIn('Melody evidence: 8 notes', trace[1])
+        self.assertIn('Contour evidence:', trace[2])
+        self.assertIn('confidence hint=', trace[3])
+
+    def test_reasoning_confidence_hint_branch_bounds(self):
+        low = self.module._derive_reasoning_confidence_hint(
+            unique_count=0,
+            span=0,
+            average_step=25.0,
+            tonal_overlap=-0.5,
+        )
+        high = self.module._derive_reasoning_confidence_hint(
+            unique_count=20,
+            span=60,
+            average_step=2.8,
+            tonal_overlap=2.0,
+        )
+        self.assertGreaterEqual(low, 0.0)
+        self.assertLessEqual(high, 1.0)
+        self.assertGreater(high, low)
+
     def test_build_transcription_text_with_analysis_includes_audio_profile(self):
         profile = self.module.AudioAnalysisProfile(
             fingerprint='demo-abc123',
@@ -556,6 +633,10 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
             estimated_tempo_bpm=120,
             estimated_key='D',
             melody_pitches=(60, 62, 64, 65, 67, 69, 71, 72),
+            reasoning_trace=(
+                'Tuning: RMS gate=5.0, freq=40-2000 Hz, MIDI=36-96.',
+                'Melody evidence: 8 notes, 8 unique pitches, span=12 semitones, repeated pairs=0.',
+            ),
         )
         text = self.module._build_transcription_text_with_analysis(
             audio_file='clip.mp3',
@@ -571,6 +652,8 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
         self.assertIn('Derived note count: 8', text)
         self.assertIn('Estimated key: D major', text)
         self.assertIn('Melody MIDI pitches: 60, 62, 64, 65, 67, 69, 71, 72', text)
+        self.assertIn('Reasoning trace', text)
+        self.assertIn('Tuning: RMS gate=5.0', text)
 
     def test_build_sheet_artifacts_creates_expected_outputs(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1268,11 +1351,87 @@ class TestDashboardServer(unittest.TestCase):
 
             thread.join(timeout=3)
 
+    def test_dashboard_settings_route_updates_tuning_values(self):
+        holder = {}
+        original_server = self.module.ThreadingHTTPServer
+
+        class TestServer(original_server):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                holder['server'] = self
+
+            def serve_forever(self, poll_interval=0.5):
+                for _ in range(3):
+                    self.handle_request()
+
+        with mock.patch.object(self.module, 'ThreadingHTTPServer', TestServer):
+            thread = threading.Thread(
+                target=self.module.serve_dashboard,
+                kwargs={
+                    'config': self.module.DashboardServerConfig(
+                        host='127.0.0.1',
+                        port=0,
+                        owner_id='owner-a',
+                        mode='draft',
+                        allow_hq_degradation=True,
+                    )
+                },
+                daemon=True,
+            )
+            thread.start()
+            for _ in range(20):
+                if 'server' in holder:
+                    break
+                time.sleep(0.05)
+            self.assertIn('server', holder)
+
+            host, port = holder['server'].server_address
+
+            class NoRedirect(request.HTTPRedirectHandler):
+                def redirect_request(self, req, fp, code, msg, headers, newurl):
+                    return None
+
+            from urllib.parse import urlencode
+
+            payload = urlencode(
+                {
+                    'rms_gate': '7.5',
+                    'min_frequency_hz': '50',
+                    'max_frequency_hz': '1500',
+                    'cluster_tolerance_hz': '25',
+                    'pitch_floor_midi': '40',
+                    'pitch_ceiling_midi': '88',
+                }
+            ).encode('utf-8')
+            settings_request = request.Request(
+                f'http://{host}:{port}/settings',
+                data=payload,
+                method='POST',
+                headers={'Content-Type': 'application/x-www-form-urlencoded'},
+            )
+            opener = request.build_opener(NoRedirect)
+            with self.assertRaises(HTTPError) as raised:
+                opener.open(settings_request, timeout=2)
+            self.assertEqual(raised.exception.code, 303)
+            self.assertIn('/?msg=', raised.exception.headers['Location'])
+
+            html_text = request.urlopen(
+                f"http://{host}:{port}{raised.exception.headers['Location']}", timeout=2
+            ).read().decode('utf-8')
+            self.assertIn("value='7.5'", html_text)
+            self.assertIn("value='50'", html_text)
+            self.assertIn("value='1500'", html_text)
+            self.assertIn('Saved settings.', html_text)
+
+            thread.join(timeout=3)
+
     def test_render_page_includes_message_and_jobs(self):
         html_text = self.module._render_page(
             owner_id='owner-a',
             default_mode='draft',
             editor_base_url='http://127.0.0.1:3000',
+            tuning_settings=self.module.DashboardTuningSettings(),
+            settings_path='infrastructure/local-dev/dashboard_settings.json',
             message='done',
             jobs=[
                 {
@@ -1306,6 +1465,8 @@ class TestDashboardServer(unittest.TestCase):
         self.assertIn('/outputs/artifact?job=job_1&amp;name=musicxml', html_text)
         self.assertIn('hello world', html_text)
         self.assertIn('Editor app:', html_text)
+        self.assertIn('Settings', html_text)
+        self.assertIn('rms_gate', html_text)
         self.assertIn('Open editor for this job', html_text)
 
 
