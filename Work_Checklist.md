@@ -93,3 +93,4 @@ Implementation checklist mirroring `Final_Spec.md`. Every item has a unique chec
 
 
 - [x] WC-TASK-010: Complete DT-025 final regression and branch coverage gate by enforcing pytest import-mode stability, CI branch-coverage threshold (>=95%), Windows runbook alignment checks, and publishing user guide artifacts.
+- [x] WC-TASK-011: Add standard cross-platform startup entrypoints (`start.sh`/`start.ps1`) backed by a canonical Python launcher, document user-facing launch flows, and enforce with exhaustive startup tests.

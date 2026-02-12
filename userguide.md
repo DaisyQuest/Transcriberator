@@ -4,12 +4,13 @@
 
 ## Table of Contents
 1. [Quick Start](#quick-start)
-2. [System Modes](#system-modes)
-3. [End-to-End Workflow](#end-to-end-workflow)
-4. [Observability and Quality Signals](#observability-and-quality-signals)
-5. [Security and Privacy Controls](#security-and-privacy-controls)
-6. [Windows Local Runbook Alignment](#windows-local-runbook-alignment)
-7. [Troubleshooting](#troubleshooting)
+2. [Standard Entrypoints (Windows/Linux)](#standard-entrypoints-windowslinux)
+3. [System Modes](#system-modes)
+4. [End-to-End Workflow](#end-to-end-workflow)
+5. [Observability and Quality Signals](#observability-and-quality-signals)
+6. [Security and Privacy Controls](#security-and-privacy-controls)
+7. [Windows Local Runbook Alignment](#windows-local-runbook-alignment)
+8. [Troubleshooting](#troubleshooting)
 
 ## Quick Start
 - Upload an audio file in **MP3**, **WAV**, or **FLAC** format.
@@ -19,6 +20,27 @@
 - Track stage progress and status from dashboard job rows.
 - Open editor views to refine notation and timing.
 - Export output artifacts (MusicXML primary; MIDI/PDF/PNG as available in your configured pipeline).
+
+
+## Standard Entrypoints (Windows/Linux)
+Use the repository-root wrappers to launch the system consistently across environments.
+
+### Linux/macOS/Git Bash
+```bash
+./start.sh --mode draft
+```
+
+### Windows PowerShell
+```powershell
+.\start.ps1 -mode hq
+```
+
+Both wrappers call `infrastructure/local-dev/start_transcriberator.py`, which guarantees startup by running a deterministic end-to-end smoke path (token issuance, project creation, job creation, orchestration stage execution).
+
+Helpful flags:
+- `--json` for machine-readable startup output.
+- `--fail-stage <stage-name>` to simulate startup-stage failures.
+- `--no-hq-degradation` to force HQ source-separation failures to surface as hard startup errors.
 
 ## System Modes
 ### Draft
