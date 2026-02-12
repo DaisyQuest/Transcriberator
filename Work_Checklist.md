@@ -104,3 +104,6 @@ Implementation checklist mirroring `Final_Spec.md`. Every item has a unique chec
 - [x] WC-TASK-017: Replace filename-only local transcription outputs with deterministic audio-content analysis so different MP3 payloads produce distinct transcription metadata and notation artifacts, with exhaustive unit coverage.
 
 - [x] WC-TASK-018: Improve deterministic local audio parsing to derive richer melody sequences for full-song uploads, update artifact generation accordingly, and add exhaustive branch-focused regression tests.
+
+- [x] WC-TASK-019: Fix long-audio transcription truncation by duration-aware melody derivation, add editor-link/dashboard observability enhancements, and expand entrypoint tests for full branch coverage.
+

@@ -10,6 +10,7 @@ import html
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
+import io
 import json
 from pathlib import Path
 import shutil
@@ -18,6 +19,7 @@ import tempfile
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 import uuid
+import wave
 import xml.etree.ElementTree as ET
 
 
@@ -32,6 +34,7 @@ class DashboardServerConfig:
     owner_id: str
     mode: str
     allow_hq_degradation: bool
+    editor_base_url: str = "http://127.0.0.1:3000"
 
 
 @dataclass(frozen=True)
@@ -40,6 +43,7 @@ class AudioAnalysisProfile:
 
     fingerprint: str
     byte_count: int
+    estimated_duration_seconds: int
     estimated_tempo_bpm: int
     estimated_key: str
     melody_pitches: tuple[int, ...]
@@ -175,17 +179,46 @@ def _analyze_audio_bytes(*, audio_file: str, audio_bytes: bytes) -> AudioAnalysi
 
     digest = hashlib.sha256(audio_bytes).digest()
     fingerprint = digest.hex()[:16]
+    estimated_duration_seconds = _estimate_audio_duration_seconds(audio_file=audio_file, audio_bytes=audio_bytes)
     estimated_tempo_bpm = _estimate_tempo_bpm(audio_bytes=audio_bytes, digest=digest)
-    melody = _derive_melody_pitches(audio_bytes=audio_bytes, digest=digest)
+    melody = _derive_melody_pitches(
+        audio_bytes=audio_bytes,
+        digest=digest,
+        estimated_duration_seconds=estimated_duration_seconds,
+        estimated_tempo_bpm=estimated_tempo_bpm,
+    )
     estimated_key = _estimate_key(melody_pitches=melody, digest=digest)
 
     return AudioAnalysisProfile(
         fingerprint=f"{Path(audio_file).stem}-{fingerprint}",
         byte_count=len(audio_bytes),
+        estimated_duration_seconds=estimated_duration_seconds,
         estimated_tempo_bpm=estimated_tempo_bpm,
         estimated_key=estimated_key,
         melody_pitches=tuple(melody),
     )
+
+
+def _estimate_audio_duration_seconds(*, audio_file: str, audio_bytes: bytes) -> int:
+    suffix = Path(audio_file).suffix.lower()
+
+    if suffix == ".wav":
+        try:
+            with wave.open(io.BytesIO(audio_bytes), "rb") as wav_file:
+                frame_rate = wav_file.getframerate()
+                frame_count = wav_file.getnframes()
+                if frame_rate > 0 and frame_count > 0:
+                    return max(1, int(round(frame_count / frame_rate)))
+        except (wave.Error, EOFError):
+            pass
+
+    bytes_per_second_by_format = {
+        ".mp3": 16_000,
+        ".flac": 24_000,
+        ".wav": 176_000,
+    }
+    fallback_bps = bytes_per_second_by_format.get(suffix, 16_000)
+    return max(1, int(round(len(audio_bytes) / fallback_bps)))
 
 
 def _estimate_tempo_bpm(*, audio_bytes: bytes, digest: bytes) -> int:
@@ -203,8 +236,16 @@ def _estimate_tempo_bpm(*, audio_bytes: bytes, digest: bytes) -> int:
     return 72 + int(weighted_activity * 88)  # 72..160 BPM
 
 
-def _derive_melody_pitches(*, audio_bytes: bytes, digest: bytes) -> tuple[int, ...]:
-    note_count = min(32, max(8, len(audio_bytes) // 200_000 + 8))
+def _derive_melody_pitches(
+    *,
+    audio_bytes: bytes,
+    digest: bytes,
+    estimated_duration_seconds: int,
+    estimated_tempo_bpm: int,
+) -> tuple[int, ...]:
+    notes_per_second = max(1.0, estimated_tempo_bpm / 60.0)
+    projected_note_count = int(round(estimated_duration_seconds * notes_per_second))
+    note_count = min(1024, max(8, projected_note_count))
     window_size = max(64, len(audio_bytes) // note_count)
     melody: list[int] = []
 
@@ -270,8 +311,10 @@ def _build_transcription_text_with_analysis(
         "Audio analysis\n"
         f"- Fingerprint: {profile.fingerprint}\n"
         f"- Byte count: {profile.byte_count}\n"
+        f"- Estimated duration: {profile.estimated_duration_seconds} seconds\n"
         f"- Estimated tempo: {profile.estimated_tempo_bpm} BPM\n"
         f"- Estimated key: {profile.estimated_key} major\n"
+        f"- Derived note count: {len(profile.melody_pitches)}\n"
         f"- Melody MIDI pitches: {', '.join(str(p) for p in profile.melody_pitches)}\n"
     )
 
@@ -465,7 +508,14 @@ def _augment_transcription_with_artifacts(*, transcription_text: str, artifacts:
     )
 
 
-def _render_page(*, owner_id: str, default_mode: str, jobs: list[dict[str, Any]], message: str = "") -> str:
+def _render_page(
+    *,
+    owner_id: str,
+    default_mode: str,
+    jobs: list[dict[str, Any]],
+    editor_base_url: str,
+    message: str = "",
+) -> str:
     rows = []
     for job in jobs:
         stage_rows = "".join(
@@ -484,8 +534,13 @@ def _render_page(*, owner_id: str, default_mode: str, jobs: list[dict[str, Any]]
             f"<p><strong>Job:</strong> {html.escape(job['jobId'])} | <strong>Mode:</strong> {html.escape(job['mode'])} | "
             f"<strong>Status:</strong> {html.escape(job['finalStatus'])}</p>"
             f"<p><strong>Submitted:</strong> {html.escape(job['submittedAtUtc'])}</p>"
+            f"<p><strong>Estimated duration:</strong> {html.escape(str(job['estimatedDurationSeconds']))} sec | "
+            f"<strong>Estimated tempo:</strong> {html.escape(str(job['estimatedTempoBpm']))} BPM | "
+            f"<strong>Estimated key:</strong> {html.escape(job['estimatedKey'])} major | "
+            f"<strong>Derived notes:</strong> {html.escape(str(job['derivedNoteCount']))}</p>"
             f"<p><strong>Transcription output:</strong> <code>{html.escape(job['transcriptionPath'])}</code><br/>"
             f"<a href='/outputs/transcription?job={html.escape(job['jobId'])}' target='_blank' rel='noopener'>View raw output</a></p>"
+            f"<p><strong>Editor:</strong> <a href='{html.escape(job['editorUrl'])}' target='_blank' rel='noopener'>Open editor for this job</a></p>"
             f"<p><strong>Sheet music artifacts:</strong></p><ul>{artifact_rows or '<li>No artifacts recorded.</li>'}</ul>"
             "<form action='/edit-transcription' method='post'>"
             f"<input type='hidden' name='job_id' value='{html.escape(job['jobId'])}'/>"
@@ -521,6 +576,7 @@ def _render_page(*, owner_id: str, default_mode: str, jobs: list[dict[str, Any]]
 <body>
   <h1>Transcriberator Dashboard</h1>
   <p class='hint'>Owner: <strong>{html.escape(owner_id)}</strong>. Upload MP3/WAV/FLAC to run a full local transcription pipeline.</p>
+  <p class='hint'>Editor app: <a href='{html.escape(editor_base_url)}' target='_blank' rel='noopener'>{html.escape(editor_base_url)}</a></p>
   {f"<div class='notice'>{html.escape(message)}</div>" if message else ''}
   <form action='/transcribe' method='post' enctype='multipart/form-data'>
     <label for='audio'>Audio file:</label><br/>
@@ -585,6 +641,7 @@ def serve_dashboard(*, config: DashboardServerConfig) -> None:
                 owner_id=state["owner_id"],
                 default_mode=state["default_mode"],
                 jobs=list(reversed(state["jobs"][-10:])),
+                editor_base_url=config.editor_base_url,
                 message=message,
             )
             payload = html_content.encode("utf-8")
@@ -781,12 +838,18 @@ def serve_dashboard(*, config: DashboardServerConfig) -> None:
             summary["transcriptionPath"] = str(transcription_path)
             summary["transcriptionText"] = transcription_text
             summary["sheetArtifacts"] = artifacts
+            summary["estimatedDurationSeconds"] = profile.estimated_duration_seconds
+            summary["estimatedTempoBpm"] = profile.estimated_tempo_bpm
+            summary["estimatedKey"] = profile.estimated_key
+            summary["derivedNoteCount"] = len(profile.melody_pitches)
+            summary["editorUrl"] = f"{config.editor_base_url.rstrip('/')}/?job={job.id}"
             state["jobs"].append(summary)
             return (
                 f"Transcription complete for {safe_filename}. "
                 f"Job {job.id} finished with status {summary['finalStatus']}. "
                 f"Output: {summary['transcriptionPath']}. "
-                f"Sheet music: {', '.join(artifact['path'] for artifact in artifacts)}"
+                f"Sheet music: {', '.join(artifact['path'] for artifact in artifacts)}. "
+                f"Editor: {summary['editorUrl']}"
             )
 
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
@@ -826,6 +889,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--smoke-run", action="store_true", help="Run one startup smoke job and exit.")
     parser.add_argument("--host", default="127.0.0.1", help="Dashboard bind host.")
     parser.add_argument("--port", type=int, default=4173, help="Dashboard bind port.")
+    parser.add_argument("--editor-url", default="http://127.0.0.1:3000", help="Base URL for the editor app.")
     return parser
 
 
@@ -859,6 +923,7 @@ def main(argv: list[str] | None = None) -> int:
             owner_id=args.owner_id,
             mode=_validate_mode(args.mode),
             allow_hq_degradation=not args.no_hq_degradation,
+            editor_base_url=args.editor_url,
         )
         serve_dashboard(config=config)
     except StartupError as exc:
