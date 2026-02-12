@@ -140,12 +140,12 @@
     <section id="entrypoints" aria-labelledby="entrypoints-heading">
       <h2 id="entrypoints-heading">Standard Entrypoints (Windows/Linux)</h2>
       <p>Use repository-root wrappers for consistent startup behavior:</p>
-      <pre><code>./start.sh --mode draft
-.\start.ps1 -mode hq</code></pre>
-      <p>Both wrappers delegate to <code>infrastructure/local-dev/start_transcriberator.py</code>, which runs a deterministic startup smoke path over dashboard API and orchestrator skeletons to guarantee the application can start locally.</p>
+      <pre><code>./start.sh --mode draft --host 127.0.0.1 --port 4173
+.\start.ps1 -mode hq -host 127.0.0.1 -port 4173</code></pre>
+      <p>Both wrappers delegate to <code>infrastructure/local-dev/start_transcriberator.py</code>, which starts a local dashboard server for interactive audio upload and transcription runs.</p>
       <ul>
-        <li><code>--json</code>: emit machine-readable startup output.</li>
-        <li><code>--fail-stage &lt;stage-name&gt;</code>: simulate startup failures for troubleshooting.</li>
+        <li><code>--smoke-run --json</code>: emit machine-readable smoke-run output.</li>
+        <li><code>--smoke-run --fail-stage &lt;stage-name&gt;</code>: simulate startup failures for troubleshooting.</li>
         <li><code>--no-hq-degradation</code>: disable HQ fallback so separation failures fail fast.</li>
       </ul>
     </section>

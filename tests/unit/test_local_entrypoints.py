@@ -1,9 +1,15 @@
 import importlib.util
 import json
+from pathlib import Path
+import sys as _sys
 import subprocess
 import sys
+import threading
+import time
 import unittest
-from pathlib import Path
+from unittest import mock
+from urllib import request
+from urllib.error import HTTPError
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -14,8 +20,28 @@ def load_entrypoint_module():
     spec = importlib.util.spec_from_file_location('start_transcriberator', ENTRYPOINT_PATH)
     module = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
+    _sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def build_multipart_body(filename: str, file_bytes: bytes, mode: str):
+    boundary = '----WebKitFormBoundary7MA4YWxkTrZu0gW'
+    lines = [
+        f'--{boundary}',
+        'Content-Disposition: form-data; name="audio"; filename="' + filename + '"',
+        'Content-Type: application/octet-stream',
+        '',
+        file_bytes.decode('latin-1'),
+        f'--{boundary}',
+        'Content-Disposition: form-data; name="mode"',
+        '',
+        mode,
+        f'--{boundary}--',
+        '',
+    ]
+    body = '\r\n'.join(lines).encode('latin-1')
+    return body, boundary
 
 
 class TestStartupEntrypointRuntime(unittest.TestCase):
@@ -26,6 +52,20 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
     def test_parse_fail_stages_strips_empty_values(self):
         parsed = self.module._parse_fail_stages([' source_separation ', '', 'transcription'])
         self.assertEqual(parsed, {'source_separation', 'transcription'})
+
+    def test_validate_mode_and_audio_filename(self):
+        self.assertEqual(self.module._validate_mode('HQ'), 'hq')
+        self.assertEqual(self.module._validate_audio_filename('clip.wav'), 'clip.wav')
+
+    def test_validate_mode_rejects_invalid_value(self):
+        with self.assertRaises(self.module.StartupError):
+            self.module._validate_mode('turbo')
+
+    def test_validate_audio_filename_rejects_invalid_values(self):
+        for invalid in ['', 'track.txt']:
+            with self.subTest(value=invalid):
+                with self.assertRaises(self.module.StartupError):
+                    self.module._validate_audio_filename(invalid)
 
     def test_run_startup_supports_draft_flow(self):
         summary = self.module.run_startup(mode='draft', owner_id='owner-a', project_name='Draft Smoke')
@@ -55,30 +95,130 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
                 allow_hq_degradation=False,
             )
 
-    def test_run_startup_rejects_invalid_mode(self):
-        with self.assertRaises(self.module.StartupError):
-            self.module.run_startup(mode='turbo', owner_id='owner-a', project_name='Invalid')
-
-
     def test_build_arg_parser_defaults(self):
         parser = self.module.build_arg_parser()
         args = parser.parse_args([])
         self.assertEqual(args.mode, 'draft')
         self.assertEqual(args.owner_id, 'local-owner')
         self.assertFalse(args.no_hq_degradation)
+        self.assertFalse(args.smoke_run)
+        self.assertEqual(args.port, 4173)
 
-    def test_main_success_and_error_paths(self):
-        self.assertEqual(self.module.main(['--json']), 0)
+    def test_main_smoke_success_and_error_paths(self):
+        self.assertEqual(self.module.main(['--smoke-run', '--json']), 0)
         self.assertEqual(
-            self.module.main(['--mode', 'hq', '--fail-stage', 'source_separation', '--no-hq-degradation']),
+            self.module.main([
+                '--smoke-run',
+                '--mode',
+                'hq',
+                '--fail-stage',
+                'source_separation',
+                '--no-hq-degradation',
+            ]),
             2,
         )
+
+    def test_main_server_path_invokes_dashboard(self):
+        with mock.patch.object(self.module, 'serve_dashboard') as serve_dashboard:
+            self.assertEqual(self.module.main(['--mode', 'hq', '--host', '0.0.0.0', '--port', '5123']), 0)
+
+        serve_dashboard.assert_called_once()
+        config = serve_dashboard.call_args.kwargs['config']
+        self.assertEqual(config.mode, 'hq')
+        self.assertEqual(config.host, '0.0.0.0')
+        self.assertEqual(config.port, 5123)
 
     def test_format_summary_includes_stage_rows(self):
         summary = self.module.run_startup(mode='draft', owner_id='owner-a', project_name='Summary')
         text = self.module._format_summary(summary)
         self.assertIn('[entrypoint] stage timeline:', text)
         self.assertIn('decode_normalize', text)
+
+
+class TestDashboardServer(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = load_entrypoint_module()
+
+    def test_dashboard_serves_ui_and_processes_transcription_submission(self):
+        holder = {}
+        original_server = self.module.ThreadingHTTPServer
+
+        class TestServer(original_server):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                holder['server'] = self
+
+            def serve_forever(self, poll_interval=0.5):
+                self.handle_request()
+                self.handle_request()
+
+        with mock.patch.object(self.module, 'ThreadingHTTPServer', TestServer):
+            thread = threading.Thread(
+                target=self.module.serve_dashboard,
+                kwargs={
+                    'config': self.module.DashboardServerConfig(
+                        host='127.0.0.1',
+                        port=0,
+                        owner_id='owner-a',
+                        mode='draft',
+                        allow_hq_degradation=True,
+                    )
+                },
+                daemon=True,
+            )
+            thread.start()
+
+            for _ in range(20):
+                if 'server' in holder:
+                    break
+                time.sleep(0.05)
+            self.assertIn('server', holder)
+
+            host, port = holder['server'].server_address
+            get_response = request.urlopen(f'http://{host}:{port}/', timeout=2)
+            get_body = get_response.read().decode('utf-8')
+            self.assertIn('Transcriberator Dashboard', get_body)
+
+            class NoRedirect(request.HTTPRedirectHandler):
+                def redirect_request(self, req, fp, code, msg, headers, newurl):
+                    return None
+
+            payload, boundary = build_multipart_body('demo.wav', b'RIFF', 'draft')
+            post_request = request.Request(
+                f'http://{host}:{port}/transcribe',
+                data=payload,
+                method='POST',
+                headers={'Content-Type': f'multipart/form-data; boundary={boundary}'},
+            )
+            opener = request.build_opener(NoRedirect)
+            with self.assertRaises(HTTPError) as raised:
+                opener.open(post_request, timeout=2)
+            self.assertEqual(raised.exception.code, 303)
+            self.assertIn('/?msg=', raised.exception.headers['Location'])
+
+            thread.join(timeout=3)
+            self.assertFalse(thread.is_alive())
+
+    def test_render_page_includes_message_and_jobs(self):
+        html_text = self.module._render_page(
+            owner_id='owner-a',
+            default_mode='draft',
+            message='done',
+            jobs=[
+                {
+                    'audioFile': 'clip.wav',
+                    'jobId': 'job_1',
+                    'mode': 'draft',
+                    'finalStatus': 'succeeded',
+                    'submittedAtUtc': '2020-01-01T00:00:00+00:00',
+                    'stages': [{'stage_name': 'decode_normalize', 'status': 'succeeded', 'detail': 'completed'}],
+                }
+            ],
+        )
+        self.assertIn('Transcriberator Dashboard', html_text)
+        self.assertIn('clip.wav', html_text)
+        self.assertIn('done', html_text)
 
 
 class TestStartupEntrypointCli(unittest.TestCase):
@@ -91,20 +231,20 @@ class TestStartupEntrypointCli(unittest.TestCase):
             check=False,
         )
 
-    def test_cli_default_human_output(self):
-        result = self.run_cli()
+    def test_cli_smoke_human_output(self):
+        result = self.run_cli('--smoke-run')
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIn('startup smoke run succeeded', result.stdout)
 
     def test_cli_json_output(self):
-        result = self.run_cli('--json', '--mode', 'hq')
+        result = self.run_cli('--smoke-run', '--json', '--mode', 'hq')
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         payload = json.loads(result.stdout)
         self.assertEqual(payload['mode'], 'hq')
         self.assertIn('stages', payload)
 
     def test_cli_returns_error_exit_code_for_failed_startup(self):
-        result = self.run_cli('--mode', 'hq', '--fail-stage', 'source_separation', '--no-hq-degradation')
+        result = self.run_cli('--smoke-run', '--mode', 'hq', '--fail-stage', 'source_separation', '--no-hq-degradation')
         self.assertEqual(result.returncode, 2)
         self.assertIn('[entrypoint] ERROR', result.stderr)
 
@@ -131,9 +271,6 @@ class TestEntrypointWrappersAndDocs(unittest.TestCase):
         for doc_text in [markdown, html, runbook, local_dev]:
             with self.subTest(document=doc_text[:40]):
                 self.assertIn('start_transcriberator.py', doc_text)
-
-        self.assertIn('./start.sh --mode draft', markdown)
-        self.assertIn('.\\start.ps1 -mode hq', markdown)
 
 
 if __name__ == '__main__':

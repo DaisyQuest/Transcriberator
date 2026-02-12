@@ -27,20 +27,20 @@ Use the repository-root wrappers to launch the system consistently across enviro
 
 ### Linux/macOS/Git Bash
 ```bash
-./start.sh --mode draft
+./start.sh --mode draft --host 127.0.0.1 --port 4173
 ```
 
 ### Windows PowerShell
 ```powershell
-.\start.ps1 -mode hq
+.\start.ps1 -mode hq -host 127.0.0.1 -port 4173
 ```
 
-Both wrappers call `infrastructure/local-dev/start_transcriberator.py`, which guarantees startup by running a deterministic end-to-end smoke path (token issuance, project creation, job creation, orchestration stage execution).
+Both wrappers call `infrastructure/local-dev/start_transcriberator.py`, which starts the local dashboard web server so users can upload audio files and run transcriptions interactively.
 
 Helpful flags:
-- `--json` for machine-readable startup output.
-- `--fail-stage <stage-name>` to simulate startup-stage failures.
-- `--no-hq-degradation` to force HQ source-separation failures to surface as hard startup errors.
+- `--smoke-run --json` for machine-readable one-shot startup validation.
+- `--smoke-run --fail-stage <stage-name>` to simulate startup-stage failures.
+- `--no-hq-degradation` to force HQ source-separation failures to surface as hard errors.
 
 ## System Modes
 ### Draft
