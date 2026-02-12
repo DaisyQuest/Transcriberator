@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 import tempfile
 import xml.etree.ElementTree as ET
@@ -9,6 +10,7 @@ import sys
 import threading
 import time
 import unittest
+import wave
 from unittest import mock
 from urllib import request
 from urllib.error import HTTPError
@@ -111,6 +113,7 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
         self.assertFalse(args.no_hq_degradation)
         self.assertFalse(args.smoke_run)
         self.assertEqual(args.port, 4173)
+        self.assertEqual(args.editor_url, 'http://127.0.0.1:3000')
 
     def test_main_smoke_success_and_error_paths(self):
         self.assertEqual(self.module.main(['--smoke-run', '--json']), 0)
@@ -169,7 +172,7 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
         profile = self.module._analyze_audio_bytes(audio_file='song.mp3', audio_bytes=payload)
 
         self.assertGreaterEqual(len(profile.melody_pitches), 8)
-        self.assertGreaterEqual(len(set(profile.melody_pitches)), len(profile.melody_pitches) // 4)
+        self.assertGreaterEqual(len(set(profile.melody_pitches)), 16)
         self.assertTrue(all(48 <= pitch <= 83 for pitch in profile.melody_pitches))
 
     def test_estimate_tempo_bpm_tracks_activity_level(self):
@@ -184,11 +187,59 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
         self.assertLessEqual(low_tempo, 160)
         self.assertGreater(high_tempo, low_tempo)
 
+
+    def test_estimate_audio_duration_seconds_uses_wav_metadata(self):
+        sample_rate = 8_000
+        duration_seconds = 125
+        frame_count = sample_rate * duration_seconds
+        buffer = io.BytesIO()
+        with wave.open(buffer, 'wb') as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(1)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(bytes([128]) * frame_count)
+
+        payload = buffer.getvalue()
+        estimated = self.module._estimate_audio_duration_seconds(audio_file='long.wav', audio_bytes=payload)
+
+        self.assertEqual(estimated, duration_seconds)
+
+    def test_estimate_audio_duration_seconds_falls_back_for_invalid_wav(self):
+        estimated = self.module._estimate_audio_duration_seconds(audio_file='broken.wav', audio_bytes=b'not-a-real-wav-payload')
+
+        self.assertEqual(estimated, 1)
+
+    def test_derive_melody_pitches_scales_with_duration(self):
+        audio = bytes((index * 13) % 256 for index in range(200_000))
+        digest = b'\x0f' * 32
+
+        short = self.module._derive_melody_pitches(
+            audio_bytes=audio,
+            digest=digest,
+            estimated_duration_seconds=16,
+            estimated_tempo_bpm=60,
+        )
+        long = self.module._derive_melody_pitches(
+            audio_bytes=audio,
+            digest=digest,
+            estimated_duration_seconds=140,
+            estimated_tempo_bpm=120,
+        )
+
+        self.assertEqual(len(short), 16)
+        self.assertEqual(len(long), 280)
+        self.assertGreater(len(long), len(short))
+
     def test_derive_melody_pitches_enforces_diversity_floor(self):
         audio = bytes([130] * 900_000)
         digest = b'\x00' * 32
 
-        melody = self.module._derive_melody_pitches(audio_bytes=audio, digest=digest)
+        melody = self.module._derive_melody_pitches(
+            audio_bytes=audio,
+            digest=digest,
+            estimated_duration_seconds=6,
+            estimated_tempo_bpm=120,
+        )
 
         self.assertEqual(len(melody), 12)
         self.assertGreaterEqual(len(set(melody)), 4)
@@ -209,6 +260,7 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
         profile = self.module.AudioAnalysisProfile(
             fingerprint='demo-abc123',
             byte_count=128,
+            estimated_duration_seconds=95,
             estimated_tempo_bpm=120,
             estimated_key='D',
             melody_pitches=(60, 62, 64, 65, 67, 69, 71, 72),
@@ -222,7 +274,9 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
 
         self.assertIn('Audio analysis', text)
         self.assertIn('Fingerprint: demo-abc123', text)
+        self.assertIn('Estimated duration: 95 seconds', text)
         self.assertIn('Estimated tempo: 120 BPM', text)
+        self.assertIn('Derived note count: 8', text)
         self.assertIn('Estimated key: D major', text)
         self.assertIn('Melody MIDI pitches: 60, 62, 64, 65, 67, 69, 71, 72', text)
 
@@ -231,6 +285,7 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
             profile = self.module.AudioAnalysisProfile(
                 fingerprint='demo-fingerprint',
                 byte_count=256,
+                estimated_duration_seconds=72,
                 estimated_tempo_bpm=108,
                 estimated_key='A',
                 melody_pitches=(61, 63, 66, 68, 70, 73, 75, 78),
@@ -862,6 +917,7 @@ class TestDashboardServer(unittest.TestCase):
         html_text = self.module._render_page(
             owner_id='owner-a',
             default_mode='draft',
+            editor_base_url='http://127.0.0.1:3000',
             message='done',
             jobs=[
                 {
@@ -872,6 +928,11 @@ class TestDashboardServer(unittest.TestCase):
                     'submittedAtUtc': '2020-01-01T00:00:00+00:00',
                     'transcriptionPath': '/tmp/job_1_transcription.txt',
                     'transcriptionText': 'hello world',
+                    'estimatedDurationSeconds': 131,
+                    'estimatedTempoBpm': 128,
+                    'estimatedKey': 'G',
+                    'derivedNoteCount': 272,
+                    'editorUrl': 'http://127.0.0.1:3000/?job=job_1',
                     'sheetArtifacts': [
                         {
                             'name': 'musicxml',
@@ -889,6 +950,8 @@ class TestDashboardServer(unittest.TestCase):
         self.assertIn('/outputs/transcription?job=job_1', html_text)
         self.assertIn('/outputs/artifact?job=job_1&amp;name=musicxml', html_text)
         self.assertIn('hello world', html_text)
+        self.assertIn('Editor app:', html_text)
+        self.assertIn('Open editor for this job', html_text)
 
 
 class TestStartupEntrypointCli(unittest.TestCase):
