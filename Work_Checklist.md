@@ -79,4 +79,5 @@ Implementation checklist mirroring `Final_Spec.md`. Every item has a unique chec
 - [x] WC-TASK-002: Create `Development_Tasks.md` with serial-first shared-contract planning and conflict-minimizing delegation guidance.
 - [x] WC-TASK-003: Complete DT-001/DT-002/DT-003 by updating repository policy workflow, establishing test harness baseline governance, and publishing shared-contracts domain entity v1 schemas with compatibility policy.
 - [x] WC-TASK-004: Complete DT-004/DT-005/DT-006 shared contracts for Score IR, worker RPC envelopes, and orchestrator stage-state semantics with expanded validation tests.
+- [x] WC-TASK-005: Complete DT-010/DT-011/DT-012/DT-013/DT-014/DT-015 by adding orchestrator and pipeline worker runtime skeleton modules with deterministic behavior and high-coverage unit tests.
 - [x] WC-TASK-005: Complete DT-007/DT-008/DT-009 by adding dashboard-api, dashboard-ui, and editor-app skeletons with comprehensive branch coverage tests.
