@@ -139,6 +139,23 @@ def _format_summary(summary: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _build_transcription_text(*, audio_file: str, mode: str, stages: list[dict[str, Any]]) -> str:
+    stage_lines = "\n".join(
+        f"- {stage['stage_name']}: {stage['status']} ({stage['detail']})"
+        for stage in stages
+    )
+    return (
+        f"Transcription draft for {audio_file}\n"
+        f"Mode: {mode}\n"
+        "\n"
+        "Pipeline timeline\n"
+        f"{stage_lines}\n"
+        "\n"
+        "Notes\n"
+        "- Edit this text directly in the dashboard and save to keep local revisions.\n"
+    )
+
+
 def _render_page(*, owner_id: str, default_mode: str, jobs: list[dict[str, Any]], message: str = "") -> str:
     rows = []
     for job in jobs:
@@ -152,6 +169,15 @@ def _render_page(*, owner_id: str, default_mode: str, jobs: list[dict[str, Any]]
             f"<p><strong>Job:</strong> {html.escape(job['jobId'])} | <strong>Mode:</strong> {html.escape(job['mode'])} | "
             f"<strong>Status:</strong> {html.escape(job['finalStatus'])}</p>"
             f"<p><strong>Submitted:</strong> {html.escape(job['submittedAtUtc'])}</p>"
+            f"<p><strong>Transcription output:</strong> <code>{html.escape(job['transcriptionPath'])}</code><br/>"
+            f"<a href='/outputs/transcription?job={html.escape(job['jobId'])}' target='_blank' rel='noopener'>View raw output</a></p>"
+            "<form action='/edit-transcription' method='post'>"
+            f"<input type='hidden' name='job_id' value='{html.escape(job['jobId'])}'/>"
+            "<label><strong>Edit transcription:</strong><br/>"
+            f"<textarea name='transcription_text' rows='10' style='width:100%;font-family:monospace'>{html.escape(job['transcriptionText'])}</textarea>"
+            "</label><br/>"
+            "<button type='submit'>Save transcription edits</button>"
+            "</form>"
             f"<ol>{stage_rows}</ol>"
             "</article>"
         )
@@ -172,6 +198,7 @@ def _render_page(*, owner_id: str, default_mode: str, jobs: list[dict[str, Any]]
     form {{ border: 1px solid #ddd; padding: 1rem; border-radius: 8px; background: #fafafa; }}
     .notice {{ background: #ecfeff; border: 1px solid #0891b2; padding: 0.75rem; border-radius: 8px; margin-bottom: 1rem; }}
     .job-card {{ border: 1px solid #e5e7eb; border-radius: 8px; padding: 1rem; margin-top: 1rem; }}
+    textarea {{ margin-top: 0.5rem; }}
     button {{ padding: 0.5rem 1rem; }}
   </style>
 </head>
@@ -223,6 +250,10 @@ def serve_dashboard(*, config: DashboardServerConfig) -> None:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
+            if parsed.path == "/outputs/transcription":
+                self._serve_transcription_output(parsed.query)
+                return
+
             if parsed.path != "/":
                 self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
                 return
@@ -243,8 +274,27 @@ def serve_dashboard(*, config: DashboardServerConfig) -> None:
             self.end_headers()
             self.wfile.write(payload)
 
+        def _serve_transcription_output(self, query: str) -> None:
+            params = parse_qs(query)
+            job_id = params.get("job", [""])[0]
+            job = next((candidate for candidate in state["jobs"] if candidate["jobId"] == job_id), None)
+            if not job:
+                self.send_error(HTTPStatus.NOT_FOUND, "Job transcription not found")
+                return
+
+            payload = job["transcriptionText"].encode("utf-8")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
         def do_POST(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
+            if parsed.path == "/edit-transcription":
+                self._handle_edit_transcription()
+                return
+
             if parsed.path != "/transcribe":
                 self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
                 return
@@ -267,6 +317,32 @@ def serve_dashboard(*, config: DashboardServerConfig) -> None:
             message = self._handle_transcribe(body=body, boundary=boundary)
             msg_id = uuid.uuid4().hex
             state["messages"][msg_id] = message
+            _redirect(self, f"/?msg={msg_id}")
+
+        def _handle_edit_transcription(self) -> None:
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                content_length = 0
+            if content_length <= 0:
+                self.send_error(HTTPStatus.BAD_REQUEST, "Missing form payload")
+                return
+
+            body = self.rfile.read(content_length).decode("utf-8", errors="ignore")
+            fields = parse_qs(body, keep_blank_values=True)
+            job_id = fields.get("job_id", [""])[0]
+            transcription_text = fields.get("transcription_text", [""])[0]
+            job = next((candidate for candidate in state["jobs"] if candidate["jobId"] == job_id), None)
+            if not job:
+                self.send_error(HTTPStatus.NOT_FOUND, "Unknown job id")
+                return
+
+            transcription_path = Path(job["transcriptionPath"])
+            transcription_path.write_text(transcription_text, encoding="utf-8")
+            job["transcriptionText"] = transcription_text
+
+            msg_id = uuid.uuid4().hex
+            state["messages"][msg_id] = f"Saved transcription edits for {job['audioFile']}."
             _redirect(self, f"/?msg={msg_id}")
 
         def _handle_transcribe(self, *, body: bytes, boundary: bytes) -> str:
@@ -325,10 +401,20 @@ def serve_dashboard(*, config: DashboardServerConfig) -> None:
                 "finalStatus": result.final_status.value,
                 "stages": [{**asdict(record), "status": record.status.value} for record in result.stage_records],
             }
+            transcription_text = _build_transcription_text(
+                audio_file=safe_filename,
+                mode=normalized_mode,
+                stages=summary["stages"],
+            )
+            transcription_path = state["uploads_dir"] / f"{job.id}_transcription.txt"
+            transcription_path.write_text(transcription_text, encoding="utf-8")
+            summary["transcriptionPath"] = str(transcription_path)
+            summary["transcriptionText"] = transcription_text
             state["jobs"].append(summary)
             return (
                 f"Transcription complete for {safe_filename}. "
-                f"Job {job.id} finished with status {summary['finalStatus']}."
+                f"Job {job.id} finished with status {summary['finalStatus']}. "
+                f"Output: {summary['transcriptionPath']}"
             )
 
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A003

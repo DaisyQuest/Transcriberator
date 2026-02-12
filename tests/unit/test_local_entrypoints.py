@@ -44,6 +44,12 @@ def build_multipart_body(filename: str, file_bytes: bytes, mode: str):
     return body, boundary
 
 
+def build_edit_body(job_id: str, transcription_text: str) -> bytes:
+    from urllib.parse import urlencode
+
+    return urlencode({'job_id': job_id, 'transcription_text': transcription_text}).encode('utf-8')
+
+
 class TestStartupEntrypointRuntime(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -134,6 +140,19 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
         self.assertIn('[entrypoint] stage timeline:', text)
         self.assertIn('decode_normalize', text)
 
+    def test_build_transcription_text_includes_pipeline_details(self):
+        text = self.module._build_transcription_text(
+            audio_file='clip.wav',
+            mode='hq',
+            stages=[
+                {'stage_name': 'decode_normalize', 'status': 'succeeded', 'detail': 'completed'},
+                {'stage_name': 'transcription', 'status': 'succeeded', 'detail': 'completed'},
+            ],
+        )
+        self.assertIn('Transcription draft for clip.wav', text)
+        self.assertIn('- decode_normalize: succeeded (completed)', text)
+        self.assertIn('Edit this text directly', text)
+
 
 class TestDashboardServer(unittest.TestCase):
     @classmethod
@@ -200,6 +219,183 @@ class TestDashboardServer(unittest.TestCase):
             thread.join(timeout=3)
             self.assertFalse(thread.is_alive())
 
+    def test_dashboard_can_view_and_edit_transcription_output(self):
+        holder = {}
+        original_server = self.module.ThreadingHTTPServer
+
+        class TestServer(original_server):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                holder['server'] = self
+
+            def serve_forever(self, poll_interval=0.5):
+                for _ in range(5):
+                    self.handle_request()
+
+        with mock.patch.object(self.module, 'ThreadingHTTPServer', TestServer):
+            thread = threading.Thread(
+                target=self.module.serve_dashboard,
+                kwargs={
+                    'config': self.module.DashboardServerConfig(
+                        host='127.0.0.1',
+                        port=0,
+                        owner_id='owner-a',
+                        mode='draft',
+                        allow_hq_degradation=True,
+                    )
+                },
+                daemon=True,
+            )
+            thread.start()
+
+            for _ in range(20):
+                if 'server' in holder:
+                    break
+                time.sleep(0.05)
+            self.assertIn('server', holder)
+
+            host, port = holder['server'].server_address
+
+            class NoRedirect(request.HTTPRedirectHandler):
+                def redirect_request(self, req, fp, code, msg, headers, newurl):
+                    return None
+
+            payload, boundary = build_multipart_body('demo.wav', b'RIFF', 'draft')
+            transcribe_request = request.Request(
+                f'http://{host}:{port}/transcribe',
+                data=payload,
+                method='POST',
+                headers={'Content-Type': f'multipart/form-data; boundary={boundary}'},
+            )
+            opener = request.build_opener(NoRedirect)
+            with self.assertRaises(HTTPError):
+                opener.open(transcribe_request, timeout=2)
+
+            page = request.urlopen(f'http://{host}:{port}/', timeout=2).read().decode('utf-8')
+            marker = '/outputs/transcription?job='
+            self.assertIn(marker, page)
+            start = page.index(marker) + len(marker)
+            job_id = []
+            for char in page[start:]:
+                if char in {'\'', '"', '&', '<'}:
+                    break
+                job_id.append(char)
+            parsed_job_id = ''.join(job_id)
+            self.assertTrue(parsed_job_id.startswith('job_'))
+
+            output_text = request.urlopen(
+                f'http://{host}:{port}/outputs/transcription?job={parsed_job_id}',
+                timeout=2,
+            ).read().decode('utf-8')
+            self.assertIn('Transcription draft for demo.wav', output_text)
+
+            edit_request = request.Request(
+                f'http://{host}:{port}/edit-transcription',
+                data=build_edit_body(parsed_job_id, 'custom edit v2'),
+                method='POST',
+                headers={'Content-Type': 'application/x-www-form-urlencoded'},
+            )
+            with self.assertRaises(HTTPError) as edit_raised:
+                opener.open(edit_request, timeout=2)
+            self.assertEqual(edit_raised.exception.code, 303)
+
+            updated_text = request.urlopen(
+                f'http://{host}:{port}/outputs/transcription?job={parsed_job_id}',
+                timeout=2,
+            ).read().decode('utf-8')
+            self.assertEqual(updated_text, 'custom edit v2')
+
+            thread.join(timeout=3)
+            self.assertFalse(thread.is_alive())
+
+    def test_dashboard_transcription_output_route_returns_404_for_unknown_job(self):
+        holder = {}
+        original_server = self.module.ThreadingHTTPServer
+
+        class TestServer(original_server):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                holder['server'] = self
+
+            def serve_forever(self, poll_interval=0.5):
+                self.handle_request()
+
+        with mock.patch.object(self.module, 'ThreadingHTTPServer', TestServer):
+            thread = threading.Thread(
+                target=self.module.serve_dashboard,
+                kwargs={
+                    'config': self.module.DashboardServerConfig(
+                        host='127.0.0.1',
+                        port=0,
+                        owner_id='owner-a',
+                        mode='draft',
+                        allow_hq_degradation=True,
+                    )
+                },
+                daemon=True,
+            )
+            thread.start()
+            for _ in range(20):
+                if 'server' in holder:
+                    break
+                time.sleep(0.05)
+            self.assertIn('server', holder)
+
+            host, port = holder['server'].server_address
+            with self.assertRaises(HTTPError) as raised:
+                request.urlopen(f'http://{host}:{port}/outputs/transcription?job=missing', timeout=2)
+            self.assertEqual(raised.exception.code, 404)
+
+            thread.join(timeout=3)
+            self.assertFalse(thread.is_alive())
+
+    def test_dashboard_edit_transcription_returns_404_for_unknown_job(self):
+        holder = {}
+        original_server = self.module.ThreadingHTTPServer
+
+        class TestServer(original_server):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                holder['server'] = self
+
+            def serve_forever(self, poll_interval=0.5):
+                self.handle_request()
+
+        with mock.patch.object(self.module, 'ThreadingHTTPServer', TestServer):
+            thread = threading.Thread(
+                target=self.module.serve_dashboard,
+                kwargs={
+                    'config': self.module.DashboardServerConfig(
+                        host='127.0.0.1',
+                        port=0,
+                        owner_id='owner-a',
+                        mode='draft',
+                        allow_hq_degradation=True,
+                    )
+                },
+                daemon=True,
+            )
+            thread.start()
+            for _ in range(20):
+                if 'server' in holder:
+                    break
+                time.sleep(0.05)
+            self.assertIn('server', holder)
+
+            host, port = holder['server'].server_address
+            edit_request = request.Request(
+                f'http://{host}:{port}/edit-transcription',
+                data=build_edit_body('job_missing', 'data'),
+                method='POST',
+                headers={'Content-Type': 'application/x-www-form-urlencoded'},
+            )
+            with self.assertRaises(HTTPError) as raised:
+                request.urlopen(edit_request, timeout=2)
+            self.assertEqual(raised.exception.code, 404)
+
+            thread.join(timeout=3)
+            self.assertFalse(thread.is_alive())
+
     def test_render_page_includes_message_and_jobs(self):
         html_text = self.module._render_page(
             owner_id='owner-a',
@@ -212,6 +408,8 @@ class TestDashboardServer(unittest.TestCase):
                     'mode': 'draft',
                     'finalStatus': 'succeeded',
                     'submittedAtUtc': '2020-01-01T00:00:00+00:00',
+                    'transcriptionPath': '/tmp/job_1_transcription.txt',
+                    'transcriptionText': 'hello world',
                     'stages': [{'stage_name': 'decode_normalize', 'status': 'succeeded', 'detail': 'completed'}],
                 }
             ],
@@ -219,6 +417,8 @@ class TestDashboardServer(unittest.TestCase):
         self.assertIn('Transcriberator Dashboard', html_text)
         self.assertIn('clip.wav', html_text)
         self.assertIn('done', html_text)
+        self.assertIn('/outputs/transcription?job=job_1', html_text)
+        self.assertIn('hello world', html_text)
 
 
 class TestStartupEntrypointCli(unittest.TestCase):
