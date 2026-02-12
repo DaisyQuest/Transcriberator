@@ -28,6 +28,7 @@ def _load_module(module_name: str, relative_path: str) -> Any:
 
 draft_adapter_mod = _load_module("draft_pipeline_adapter_dt018", "modules/orchestrator/draft_pipeline_adapter.py")
 separation_mod = _load_module("worker_separation_skeleton_dt018", "modules/worker-separation/worker_separation_skeleton.py")
+observability_mod = _load_module("orchestrator_observability_dt020_hq", "modules/orchestrator/observability.py")
 
 
 @dataclass(frozen=True)
@@ -50,35 +51,56 @@ class HQPipelineResult:
 
 
 class HQPipelineAdapter:
-    def __init__(self) -> None:
-        self._draft_adapter = draft_adapter_mod.DraftPipelineAdapter()
+    def __init__(self, observability: observability_mod.InMemoryPipelineObservability | None = None) -> None:
+        self._observability = observability or observability_mod.InMemoryPipelineObservability()
+        self._draft_adapter = draft_adapter_mod.DraftPipelineAdapter(observability=self._observability)
         self._separation_worker = separation_mod.SeparationWorker()
 
     def run(self, request: HQPipelineRequest) -> HQPipelineResult:
-        separation_result = self._separation_worker.process(
-            separation_mod.SeparationTaskRequest(
-                asset_id=request.asset_id,
-                normalized_uri=f"normalized://{request.asset_id}",
-                simulate_timeout=request.simulate_separation_timeout,
+        trace_id = self._observability.start_trace("hq_pipeline", request.asset_id)
+        try:
+            with self._observability.timed_span(trace_id, "stage_b_separation"):
+                separation_result = self._separation_worker.process(
+                    separation_mod.SeparationTaskRequest(
+                        asset_id=request.asset_id,
+                        normalized_uri=f"normalized://{request.asset_id}",
+                        simulate_timeout=request.simulate_separation_timeout,
+                    )
+                )
+
+            if separation_result.degraded and not request.allow_hq_degradation:
+                raise RuntimeError("HQ separation failed and degradation is disabled")
+
+            if separation_result.degraded:
+                self._observability.metric("hq_pipeline_degraded_total", 1.0, pipeline="hq_pipeline")
+                self._observability.log("warning", "pipeline.hq.degraded", trace_id, pipeline="hq_pipeline")
+
+            draft_result = self._draft_adapter.run(
+                draft_adapter_mod.DraftPipelineRequest(
+                    asset_id=request.asset_id,
+                    source_uri=request.source_uri,
+                    audio_format=request.audio_format,
+                    polyphonic=request.polyphonic,
+                    snap_division=request.snap_division,
+                )
             )
-        )
 
-        if separation_result.degraded and not request.allow_hq_degradation:
-            raise RuntimeError("HQ separation failed and degradation is disabled")
-
-        draft_result = self._draft_adapter.run(
-            draft_adapter_mod.DraftPipelineRequest(
-                asset_id=request.asset_id,
-                source_uri=request.source_uri,
-                audio_format=request.audio_format,
-                polyphonic=request.polyphonic,
-                snap_division=request.snap_division,
+            result = HQPipelineResult(
+                draft_result=draft_result,
+                stem_uris=separation_result.stem_uris,
+                separation_quality_score=separation_result.quality_score,
+                degraded_to_draft=separation_result.degraded,
             )
-        )
-
-        return HQPipelineResult(
-            draft_result=draft_result,
-            stem_uris=separation_result.stem_uris,
-            separation_quality_score=separation_result.quality_score,
-            degraded_to_draft=separation_result.degraded,
-        )
+            self._observability.log("info", "pipeline.run.success", trace_id, pipeline="hq_pipeline")
+            self._observability.metric("pipeline_run_success_total", 1.0, pipeline="hq_pipeline")
+            return result
+        except Exception as exc:
+            self._observability.log(
+                "error",
+                "pipeline.run.failure",
+                trace_id,
+                pipeline="hq_pipeline",
+                error_type=type(exc).__name__,
+            )
+            self._observability.metric("pipeline_run_failures_total", 1.0, pipeline="hq_pipeline")
+            raise
