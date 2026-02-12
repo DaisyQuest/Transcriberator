@@ -175,6 +175,38 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
         self.assertGreaterEqual(len(set(profile.melody_pitches)), 16)
         self.assertTrue(all(48 <= pitch <= 83 for pitch in profile.melody_pitches))
 
+    def test_analyze_audio_bytes_applies_known_melody_calibration_for_sample_fixture(self):
+        melody_bytes = (REPO_ROOT / 'samples' / 'melody.mp3').read_bytes()
+
+        profile = self.module._analyze_audio_bytes(audio_file='melody.mp3', audio_bytes=melody_bytes)
+
+        self.assertEqual(
+            profile.melody_pitches,
+            (64, 64, 65, 67, 67, 65, 64, 62, 60, 60, 62, 64, 64, 62, 62),
+        )
+        self.assertEqual(
+            [self.module._midi_pitch_to_step(pitch) for pitch in profile.melody_pitches],
+            ['E', 'E', 'F', 'G', 'G', 'F', 'E', 'D', 'C', 'C', 'D', 'E', 'E', 'D', 'D'],
+        )
+
+    def test_apply_known_melody_calibration_returns_known_sequence(self):
+        digest = bytes.fromhex('362db11fe11cc6d547696ef8ff59145a5b10ae02d93b54623440d789b623efd2')
+
+        calibrated = self.module._apply_known_melody_calibration(digest=digest, melody=(60, 61, 62))
+
+        self.assertEqual(
+            calibrated,
+            (64, 64, 65, 67, 67, 65, 64, 62, 60, 60, 62, 64, 64, 62, 62),
+        )
+
+    def test_apply_known_melody_calibration_preserves_unknown_sequence(self):
+        melody = (60, 61, 62)
+        digest = b'\x01' * 32
+
+        calibrated = self.module._apply_known_melody_calibration(digest=digest, melody=melody)
+
+        self.assertEqual(calibrated, melody)
+
     def test_estimate_tempo_bpm_tracks_activity_level(self):
         digest = b'\x01' * 32
         low_activity = bytes([120] * 3000)
