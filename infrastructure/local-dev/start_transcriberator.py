@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
 import io
 import json
+import math
 from pathlib import Path
 import shutil
 import sys
@@ -320,6 +321,12 @@ def _estimate_audio_duration_seconds(*, audio_file: str, audio_bytes: bytes) -> 
 
 
 def _estimate_tempo_bpm(*, audio_bytes: bytes, digest: bytes) -> int:
+    pcm_analysis = _extract_wav_pcm(audio_bytes=audio_bytes)
+    if pcm_analysis is not None:
+        inferred_bpm = _infer_tempo_from_pcm(samples=pcm_analysis[0], sample_rate=pcm_analysis[1])
+        if inferred_bpm is not None:
+            return inferred_bpm
+
     transitions = 0
     prior_above_midpoint = audio_bytes[0] >= 128
     for raw in audio_bytes[1:]:
@@ -335,12 +342,119 @@ def _estimate_tempo_bpm(*, audio_bytes: bytes, digest: bytes) -> int:
     return 72 + int(weighted_activity * 88)  # 72..160 BPM
 
 
+def _extract_wav_pcm(*, audio_bytes: bytes) -> tuple[list[int], int] | None:
+    try:
+        with wave.open(io.BytesIO(audio_bytes), "rb") as wav_file:
+            sample_width = wav_file.getsampwidth()
+            frame_count = wav_file.getnframes()
+            channel_count = wav_file.getnchannels()
+            sample_rate = wav_file.getframerate()
+            if sample_width not in {1, 2} or frame_count <= 0 or channel_count <= 0 or sample_rate <= 0:
+                return None
+
+            frames = wav_file.readframes(frame_count)
+    except (wave.Error, EOFError):
+        return None
+
+    samples: list[int] = []
+    if sample_width == 1:
+        for frame_index in range(frame_count):
+            base_offset = frame_index * channel_count
+            samples.append(frames[base_offset] - 128)
+    else:
+        for frame_index in range(frame_count):
+            base_offset = frame_index * channel_count * sample_width
+            sample = int.from_bytes(frames[base_offset:base_offset + 2], byteorder="little", signed=True)
+            samples.append(sample)
+
+    if not samples:
+        return None
+    return samples, sample_rate
+
+
+def _infer_tempo_from_pcm(*, samples: list[int], sample_rate: int) -> int | None:
+    onset_positions = _detect_pcm_onset_positions(samples=samples, sample_rate=sample_rate)
+    if len(onset_positions) < 2:
+        return None
+
+    minimum_interval_seconds = 0.24
+    maximum_interval_seconds = 1.2
+    intervals_seconds = [
+        (right - left) / sample_rate
+        for left, right in zip(onset_positions, onset_positions[1:])
+        if right > left
+    ]
+    filtered_intervals = [
+        interval for interval in intervals_seconds if minimum_interval_seconds <= interval <= maximum_interval_seconds
+    ]
+    if not filtered_intervals:
+        return None
+
+    histogram: dict[int, int] = {}
+    for interval in filtered_intervals:
+        bucket = int(round(interval * 100))
+        histogram[bucket] = histogram.get(bucket, 0) + 1
+
+    best_bucket = max(histogram.items(), key=lambda item: (item[1], item[0]))[0]
+    representative_interval = best_bucket / 100.0
+    bpm = int(round(60.0 / representative_interval))
+    return max(72, min(160, bpm))
+
+
+def _detect_pcm_onset_positions(*, samples: list[int], sample_rate: int) -> list[int]:
+    frame_size = max(64, sample_rate // 40)
+    frame_energies: list[float] = []
+    for start in range(0, len(samples), frame_size):
+        frame = samples[start:start + frame_size]
+        if not frame:
+            continue
+        frame_energies.append(sum(abs(sample) for sample in frame) / len(frame))
+
+    if len(frame_energies) < 3:
+        return []
+
+    mean_energy = sum(frame_energies) / len(frame_energies)
+    variance = sum((energy - mean_energy) ** 2 for energy in frame_energies) / len(frame_energies)
+    threshold = mean_energy + (math.sqrt(variance) * 0.5)
+
+    onset_frames: list[int] = []
+    for frame_index in range(1, len(frame_energies) - 1):
+        previous_energy = frame_energies[frame_index - 1]
+        current_energy = frame_energies[frame_index]
+        next_energy = frame_energies[frame_index + 1]
+        if current_energy < threshold:
+            continue
+        if current_energy >= previous_energy and current_energy >= next_energy:
+            onset_frames.append(frame_index)
+
+    deduped_positions: list[int] = []
+    minimum_separation_samples = sample_rate // 4
+    for frame_index in onset_frames:
+        sample_position = frame_index * frame_size
+        if deduped_positions and sample_position - deduped_positions[-1] < minimum_separation_samples:
+            continue
+        deduped_positions.append(sample_position)
+
+    return deduped_positions
+
+
 def _derive_melody_pitches(
     *,
     audio_bytes: bytes,
     estimated_duration_seconds: int,
     estimated_tempo_bpm: int,
 ) -> tuple[int, ...]:
+    pcm_analysis = _extract_wav_pcm(audio_bytes=audio_bytes)
+    if pcm_analysis is not None:
+        inferred = _derive_melody_pitches_from_pcm(
+            samples=pcm_analysis[0],
+            sample_rate=pcm_analysis[1],
+            estimated_duration_seconds=estimated_duration_seconds,
+            estimated_tempo_bpm=estimated_tempo_bpm,
+        )
+        if inferred:
+            return inferred
+
     notes_per_second = max(1.0, estimated_tempo_bpm / 60.0)
     projected_note_count = int(round(estimated_duration_seconds * notes_per_second))
     note_count = min(1024, max(8, projected_note_count))
@@ -378,6 +492,67 @@ def _derive_melody_pitches(
             melody[index] = 48 + ((melody[index] - 48 + source + 3) % 36)
 
     return tuple(melody)
+
+
+def _derive_melody_pitches_from_pcm(
+    *,
+    samples: list[int],
+    sample_rate: int,
+    estimated_duration_seconds: int,
+    estimated_tempo_bpm: int,
+) -> tuple[int, ...]:
+    onset_positions = _detect_pcm_onset_positions(samples=samples, sample_rate=sample_rate)
+    if len(onset_positions) < 2:
+        return ()
+
+    melody: list[int] = []
+    segment_ends = onset_positions[1:] + [len(samples)]
+    for segment_start, segment_end in zip(onset_positions, segment_ends):
+        if segment_end - segment_start < max(64, sample_rate // 40):
+            continue
+        segment = samples[segment_start:segment_end]
+        peak_amplitude = max(abs(value) for value in segment)
+        if peak_amplitude < 40:
+            continue
+
+        active_threshold = max(20, int(peak_amplitude * 0.35))
+        active_start = next((i for i, value in enumerate(segment) if abs(value) >= active_threshold), None)
+        if active_start is None:
+            continue
+        max_window = max(64, sample_rate // 6)
+        analysis_window = segment[active_start:active_start + max_window]
+        if len(analysis_window) < 32:
+            continue
+
+        zero_crossings = 0
+        previous_sign = analysis_window[0] >= 0
+        for value in analysis_window[1:]:
+            current_sign = value >= 0
+            if current_sign != previous_sign:
+                zero_crossings += 1
+            previous_sign = current_sign
+
+        if zero_crossings == 0:
+            continue
+
+        frequency_hz = (zero_crossings * sample_rate) / (2 * len(analysis_window))
+        if frequency_hz < 40 or frequency_hz > 2000:
+            continue
+
+        midi_pitch = int(round(69 + (12 * math.log2(frequency_hz / 440.0))))
+        melody.append(max(36, min(96, midi_pitch)))
+
+    if not melody:
+        return ()
+
+    target_count = min(1024, max(8, int(round(estimated_duration_seconds * max(1.0, estimated_tempo_bpm / 60.0)))))
+    if len(melody) >= target_count:
+        return tuple(melody[:target_count])
+
+    padded = melody.copy()
+    while len(padded) < target_count:
+        padded.append(melody[len(padded) % len(melody)])
+    return tuple(padded)
 
 
 def _estimate_key(*, melody_pitches: tuple[int, ...], audio_bytes: bytes) -> str:
