@@ -107,3 +107,4 @@ Implementation checklist mirroring `Final_Spec.md`. Every item has a unique chec
 
 - [x] WC-TASK-019: Fix long-audio transcription truncation by duration-aware melody derivation, add editor-link/dashboard observability enhancements, and expand entrypoint tests for full branch coverage.
 - [x] WC-TASK-020: Calibrate local melody analysis for `samples/melody.mp3` so transcription emits the expected Ode-to-Joy phrase, with exhaustive regression tests for calibrated and fallback branches.
+- [x] WC-TASK-021: Generalize melody calibration from `samples/melody.mp3` into reference-instrument-aware correction for compatible recordings, with exhaustive entrypoint branch tests for candidate/fallback calibration behavior.

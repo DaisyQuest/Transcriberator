@@ -44,6 +44,20 @@ _KNOWN_MELODY_CALIBRATIONS: dict[str, tuple[int, ...]] = {
     ),
 }
 
+_REFERENCE_INSTRUMENT_PITCH_CLASSES: frozenset[int] = frozenset(
+    pitch % 12
+    for calibrated_melody in _KNOWN_MELODY_CALIBRATIONS.values()
+    for pitch in calibrated_melody
+)
+_REFERENCE_INSTRUMENT_CENTROID: float = (
+    sum(
+        pitch
+        for calibrated_melody in _KNOWN_MELODY_CALIBRATIONS.values()
+        for pitch in calibrated_melody
+    )
+    / max(1, sum(len(calibrated_melody) for calibrated_melody in _KNOWN_MELODY_CALIBRATIONS.values()))
+)
+
 
 class StartupError(RuntimeError):
     """Raised when startup execution cannot complete successfully."""
@@ -224,9 +238,74 @@ def _analyze_audio_bytes(*, audio_file: str, audio_bytes: bytes) -> AudioAnalysi
 
 def _apply_known_melody_calibration(*, digest: bytes, melody: tuple[int, ...]) -> tuple[int, ...]:
     calibrated = _KNOWN_MELODY_CALIBRATIONS.get(digest.hex())
-    if calibrated is None:
+    if calibrated is not None:
+        return calibrated
+    if not _is_reference_instrument_candidate(melody=melody):
         return melody
-    return calibrated
+    return _apply_reference_instrument_calibration(melody=melody)
+
+
+def _is_reference_instrument_candidate(*, melody: tuple[int, ...]) -> bool:
+    if len(melody) < 4:
+        return False
+
+    overlap_ratio = sum(1 for pitch in melody if (pitch % 12) in _REFERENCE_INSTRUMENT_PITCH_CLASSES) / len(melody)
+    centroid = sum(melody) / len(melody)
+    centroid_distance = abs(centroid - _REFERENCE_INSTRUMENT_CENTROID)
+    return overlap_ratio >= 0.55 and centroid_distance <= 18
+
+
+def _apply_reference_instrument_calibration(*, melody: tuple[int, ...]) -> tuple[int, ...]:
+    if not melody:
+        return melody
+
+    pitch_floor = 36
+    pitch_ceiling = 96
+    corrected: list[int] = []
+
+    for index, source_pitch in enumerate(melody):
+        candidates = [
+            source_pitch + octave_shift
+            for octave_shift in (-24, -12, 0, 12, 24)
+            if pitch_floor <= source_pitch + octave_shift <= pitch_ceiling
+        ]
+
+        if not candidates:
+            candidates = [max(pitch_floor, min(pitch_ceiling, source_pitch))]
+
+        def candidate_score(candidate_pitch: int) -> float:
+            class_penalty = 0.0 if (candidate_pitch % 12) in _REFERENCE_INSTRUMENT_PITCH_CLASSES else 1.5
+            center_penalty = abs(candidate_pitch - _REFERENCE_INSTRUMENT_CENTROID) * 0.45
+            if index == 0:
+                return class_penalty + center_penalty
+
+            leap = abs(candidate_pitch - corrected[-1])
+            leap_penalty = leap + (max(0, leap - 12) * 2.8)
+            return class_penalty + center_penalty + leap_penalty
+
+        corrected_pitch = min(candidates, key=lambda candidate: (candidate_score(candidate), candidate))
+        corrected.append(corrected_pitch)
+
+    matching_pitch_class_ratio = (
+        sum(1 for pitch in corrected if (pitch % 12) in _REFERENCE_INSTRUMENT_PITCH_CLASSES) / len(corrected)
+    )
+    if matching_pitch_class_ratio < 0.65:
+        corrected = [_snap_pitch_to_reference_pitch_class(pitch=pitch) for pitch in corrected]
+
+    return tuple(corrected)
+
+
+def _snap_pitch_to_reference_pitch_class(*, pitch: int) -> int:
+    pitch_floor = 36
+    pitch_ceiling = 96
+    candidates = [
+        candidate
+        for candidate in (pitch - 2, pitch - 1, pitch, pitch + 1, pitch + 2)
+        if pitch_floor <= candidate <= pitch_ceiling and (candidate % 12) in _REFERENCE_INSTRUMENT_PITCH_CLASSES
+    ]
+    if not candidates:
+        return pitch
+    return min(candidates, key=lambda candidate: (abs(candidate - pitch), candidate))
 
 
 def _estimate_audio_duration_seconds(*, audio_file: str, audio_bytes: bytes) -> int:
