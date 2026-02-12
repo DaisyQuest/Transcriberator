@@ -31,13 +31,13 @@ After bootstrap, launch the local skeleton system using one of the repository-ro
 ### Linux/macOS/Git Bash
 
 ```bash
-./start.sh --mode draft
+./start.sh --mode draft --host 127.0.0.1 --port 4173
 ```
 
 ### Windows PowerShell
 
 ```powershell
-.\start.ps1 -mode hq
+.\start.ps1 -mode hq -host 127.0.0.1 -port 4173
 ```
 
 Both wrappers delegate to:
@@ -46,7 +46,7 @@ Both wrappers delegate to:
 python infrastructure/local-dev/start_transcriberator.py
 ```
 
-You can pass `--json` for machine-readable output and `--fail-stage <stage-name>` for startup troubleshooting drills.
+Use `--smoke-run --json` for machine-readable one-shot validation and `--smoke-run --fail-stage <stage-name>` for startup troubleshooting drills.
 
 ## Guardrails
 

@@ -48,18 +48,18 @@ Use the repository-root wrappers so startup commands are consistent across Linux
 ### Linux/macOS/Git Bash
 
 ```bash
-./start.sh --mode draft
+./start.sh --mode draft --host 127.0.0.1 --port 4173
 ```
 
 ### Windows PowerShell
 
 ```powershell
-.\start.ps1 -mode hq
+.\start.ps1 -mode hq -host 127.0.0.1 -port 4173
 ```
 
-Both wrappers call `infrastructure/local-dev/start_transcriberator.py`, which performs a deterministic startup smoke run spanning dashboard API project/job creation and orchestrator pipeline execution.
+Both wrappers call `infrastructure/local-dev/start_transcriberator.py`, which now starts a local dashboard for interactive audio upload/transcription flows.
 
-Use `--json` for machine-readable output and `--fail-stage source_separation --no-hq-degradation` to validate failure-path observability.
+Use `--smoke-run --json` for machine-readable smoke output and `--smoke-run --fail-stage source_separation --no-hq-degradation` to validate failure-path observability.
 
 ## Local Validation Workflow
 
