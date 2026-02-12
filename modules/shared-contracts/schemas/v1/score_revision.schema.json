@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://transcriberator.dev/schemas/shared-contracts/v1/score_revision.schema.json",
+  "title": "ScoreRevision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "projectId",
+    "parentRevisionId",
+    "jobId",
+    "musicXmlUri",
+    "midiUri",
+    "pdfUri",
+    "pngUri",
+    "irVersion",
+    "createdAt"
+  ],
+  "properties": {
+    "id": {"type": "string", "format": "uuid"},
+    "projectId": {"type": "string", "format": "uuid"},
+    "parentRevisionId": {
+      "oneOf": [
+        {"type": "string", "format": "uuid"},
+        {"type": "null"}
+      ]
+    },
+    "jobId": {"type": "string", "format": "uuid"},
+    "musicXmlUri": {"type": "string", "format": "uri"},
+    "midiUri": {"type": "string", "format": "uri"},
+    "pdfUri": {"type": "string", "format": "uri"},
+    "pngUri": {"type": "string", "format": "uri"},
+    "irVersion": {"type": "string", "minLength": 1},
+    "notes": {"type": "string"},
+    "isCheckpoint": {"type": "boolean"},
+    "createdAt": {"type": "string", "format": "date-time"}
+  }
+}

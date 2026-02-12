@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://transcriberator.dev/schemas/shared-contracts/v1/audio_asset.schema.json",
+  "title": "AudioAsset",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "projectId",
+    "sourceBlobUri",
+    "normalizedBlobUri",
+    "format",
+    "durationMs",
+    "sampleRateHz",
+    "channels",
+    "createdAt"
+  ],
+  "properties": {
+    "id": {"type": "string", "format": "uuid"},
+    "projectId": {"type": "string", "format": "uuid"},
+    "sourceBlobUri": {"type": "string", "format": "uri"},
+    "normalizedBlobUri": {"type": "string", "format": "uri"},
+    "format": {"type": "string", "enum": ["mp3", "wav", "flac"]},
+    "durationMs": {"type": "integer", "minimum": 1},
+    "sampleRateHz": {"type": "integer", "minimum": 1},
+    "channels": {"type": "integer", "minimum": 1},
+    "loudnessLufs": {"type": "number"},
+    "peakDbfs": {"type": "number"},
+    "createdAt": {"type": "string", "format": "date-time"}
+  }
+}

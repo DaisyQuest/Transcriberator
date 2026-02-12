@@ -77,3 +77,4 @@ Implementation checklist mirroring `Final_Spec.md`. Every item has a unique chec
 ## Task Completion Checkboxes
 - [x] WC-TASK-001: Add module `additional_tasks/` directories, enhance `AGENTS.md`, add work description artifact, and validate via automated tests.
 - [x] WC-TASK-002: Create `Development_Tasks.md` with serial-first shared-contract planning and conflict-minimizing delegation guidance.
+- [x] WC-TASK-003: Complete DT-001/DT-002/DT-003 by updating repository policy workflow, establishing test harness baseline governance, and publishing shared-contracts domain entity v1 schemas with compatibility policy.
