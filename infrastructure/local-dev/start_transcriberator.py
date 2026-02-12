@@ -18,7 +18,7 @@ import shutil
 import sys
 import tempfile
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 import uuid
 import wave
 import xml.etree.ElementTree as ET
@@ -43,6 +43,7 @@ class DashboardServerConfig:
     mode: str
     allow_hq_degradation: bool
     editor_base_url: str = "http://127.0.0.1:3000"
+    settings_path: str = "infrastructure/local-dev/dashboard_settings.json"
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,85 @@ class AudioAnalysisProfile:
     estimated_tempo_bpm: int
     estimated_key: str
     melody_pitches: tuple[int, ...]
+    reasoning_trace: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class DashboardTuningSettings:
+    rms_gate: float = 5.0
+    min_frequency_hz: int = 40
+    max_frequency_hz: int = 2_000
+    frequency_cluster_tolerance_hz: float = 30.0
+    pitch_floor_midi: int = 36
+    pitch_ceiling_midi: int = 96
+
+
+_DEFAULT_DASHBOARD_SETTINGS_PATH = "infrastructure/local-dev/dashboard_settings.json"
+_DEFAULT_TUNING_SETTINGS = DashboardTuningSettings()
+
+
+def _normalize_tuning_settings(raw: dict[str, Any] | None) -> DashboardTuningSettings:
+    if raw is None:
+        return _DEFAULT_TUNING_SETTINGS
+
+    def _as_float(key: str, default: float, *, minimum: float, maximum: float) -> float:
+        try:
+            value = float(raw.get(key, default))
+        except (TypeError, ValueError):
+            value = default
+        return max(minimum, min(maximum, value))
+
+    def _as_int(key: str, default: int, *, minimum: int, maximum: int) -> int:
+        try:
+            value = int(raw.get(key, default))
+        except (TypeError, ValueError):
+            value = default
+        return max(minimum, min(maximum, value))
+
+    rms_gate = _as_float("rmsGate", _DEFAULT_TUNING_SETTINGS.rms_gate, minimum=0.1, maximum=100.0)
+    min_frequency_hz = _as_int("minFrequencyHz", _DEFAULT_TUNING_SETTINGS.min_frequency_hz, minimum=20, maximum=5_000)
+    max_frequency_hz = _as_int("maxFrequencyHz", _DEFAULT_TUNING_SETTINGS.max_frequency_hz, minimum=20, maximum=5_000)
+    if min_frequency_hz > max_frequency_hz:
+        min_frequency_hz, max_frequency_hz = max_frequency_hz, min_frequency_hz
+
+    frequency_cluster_tolerance_hz = _as_float(
+        "frequencyClusterToleranceHz",
+        _DEFAULT_TUNING_SETTINGS.frequency_cluster_tolerance_hz,
+        minimum=1.0,
+        maximum=200.0,
+    )
+    pitch_floor_midi = _as_int("pitchFloorMidi", _DEFAULT_TUNING_SETTINGS.pitch_floor_midi, minimum=0, maximum=127)
+    pitch_ceiling_midi = _as_int("pitchCeilingMidi", _DEFAULT_TUNING_SETTINGS.pitch_ceiling_midi, minimum=0, maximum=127)
+    if pitch_floor_midi > pitch_ceiling_midi:
+        pitch_floor_midi, pitch_ceiling_midi = pitch_ceiling_midi, pitch_floor_midi
+
+    return DashboardTuningSettings(
+        rms_gate=rms_gate,
+        min_frequency_hz=min_frequency_hz,
+        max_frequency_hz=max_frequency_hz,
+        frequency_cluster_tolerance_hz=frequency_cluster_tolerance_hz,
+        pitch_floor_midi=pitch_floor_midi,
+        pitch_ceiling_midi=pitch_ceiling_midi,
+    )
+
+
+def _load_dashboard_tuning_defaults(*, path: Path | None = None) -> DashboardTuningSettings:
+    settings_path = path or (_repo_root() / _DEFAULT_DASHBOARD_SETTINGS_PATH)
+    if not settings_path.exists():
+        return _DEFAULT_TUNING_SETTINGS
+
+    try:
+        payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return _DEFAULT_TUNING_SETTINGS
+
+    if not isinstance(payload, dict):
+        return _DEFAULT_TUNING_SETTINGS
+
+    tuning_section = payload.get("tuning", payload)
+    if not isinstance(tuning_section, dict):
+        return _DEFAULT_TUNING_SETTINGS
+    return _normalize_tuning_settings(tuning_section)
 
 
 def _load_module(name: str, path: Path) -> Any:
@@ -181,9 +261,16 @@ def _build_transcription_text(*, audio_file: str, mode: str, stages: list[dict[s
     )
 
 
-def _analyze_audio_bytes(*, audio_file: str, audio_bytes: bytes) -> AudioAnalysisProfile:
+def _analyze_audio_bytes(
+    *,
+    audio_file: str,
+    audio_bytes: bytes,
+    tuning_settings: DashboardTuningSettings | None = None,
+) -> AudioAnalysisProfile:
     if not audio_bytes:
         raise StartupError("Uploaded audio payload was empty.")
+
+    active_tuning = tuning_settings or _DEFAULT_TUNING_SETTINGS
 
     digest = hashlib.sha256(audio_bytes).digest()
     fingerprint = digest.hex()[:16]
@@ -193,6 +280,7 @@ def _analyze_audio_bytes(*, audio_file: str, audio_bytes: bytes) -> AudioAnalysi
         audio_bytes=audio_bytes,
         estimated_duration_seconds=estimated_duration_seconds,
         estimated_tempo_bpm=estimated_tempo_bpm,
+        tuning_settings=active_tuning,
     )
     refined_melody = _refine_melody_with_contour_templates(melody=melody)
     if refined_melody != melody:
@@ -201,6 +289,12 @@ def _analyze_audio_bytes(*, audio_file: str, audio_bytes: bytes) -> AudioAnalysi
         melody = _apply_known_melody_calibration(melody=melody)
         melody = _refine_melody_with_contour_templates(melody=melody)
     estimated_key = _estimate_key(melody_pitches=melody, audio_bytes=audio_bytes)
+    reasoning_trace = _build_reasoning_trace(
+        melody=tuple(melody),
+        estimated_tempo_bpm=estimated_tempo_bpm,
+        estimated_key=estimated_key,
+        tuning_settings=active_tuning,
+    )
 
     return AudioAnalysisProfile(
         fingerprint=f"{Path(audio_file).stem}-{fingerprint}",
@@ -209,7 +303,77 @@ def _analyze_audio_bytes(*, audio_file: str, audio_bytes: bytes) -> AudioAnalysi
         estimated_tempo_bpm=estimated_tempo_bpm,
         estimated_key=estimated_key,
         melody_pitches=tuple(melody),
+        reasoning_trace=reasoning_trace,
     )
+
+
+def _build_reasoning_trace(
+    *,
+    melody: tuple[int, ...],
+    estimated_tempo_bpm: int,
+    estimated_key: str,
+    tuning_settings: DashboardTuningSettings,
+) -> tuple[str, ...]:
+    if not melody:
+        return (
+            "No melodic events were detected; falling back to deterministic defaults.",
+            f"Tuning: RMS gate={tuning_settings.rms_gate}, freq={tuning_settings.min_frequency_hz}-{tuning_settings.max_frequency_hz} Hz, "
+            f"MIDI={tuning_settings.pitch_floor_midi}-{tuning_settings.pitch_ceiling_midi}.",
+        )
+
+    pitch_classes = _derive_reference_pitch_classes(melody=melody)
+    tonal_overlap = sum(1 for pitch in melody if (pitch % 12) in pitch_classes) / len(melody)
+    unique_count = len(set(melody))
+    span = max(melody) - min(melody)
+    steps = [abs(right - left) for left, right in zip(melody, melody[1:])]
+    average_step = (sum(steps) / len(steps)) if steps else 0.0
+    repeated_pairs = sum(1 for left, right in zip(melody, melody[1:]) if left == right)
+
+    confidence_hint = _derive_reasoning_confidence_hint(
+        unique_count=unique_count,
+        span=span,
+        average_step=average_step,
+        tonal_overlap=tonal_overlap,
+    )
+
+    pitch_class_names = [
+        ("C", 0),
+        ("C#", 1),
+        ("D", 2),
+        ("D#", 3),
+        ("E", 4),
+        ("F", 5),
+        ("F#", 6),
+        ("G", 7),
+        ("G#", 8),
+        ("A", 9),
+        ("A#", 10),
+        ("B", 11),
+    ]
+    dominant_classes = [name for name, value in pitch_class_names if value in pitch_classes]
+    dominant_text = ", ".join(dominant_classes[:7])
+
+    return (
+        f"Tuning: RMS gate={tuning_settings.rms_gate}, freq={tuning_settings.min_frequency_hz}-{tuning_settings.max_frequency_hz} Hz, "
+        f"MIDI={tuning_settings.pitch_floor_midi}-{tuning_settings.pitch_ceiling_midi}.",
+        f"Melody evidence: {len(melody)} notes, {unique_count} unique pitches, span={span} semitones, repeated pairs={repeated_pairs}.",
+        f"Contour evidence: avg step={average_step:.2f} semitones, tonal overlap={tonal_overlap:.2f}, dominant pitch classes={dominant_text or 'none'}.",
+        f"Musical estimate: key={estimated_key} major, tempo={estimated_tempo_bpm} BPM, confidence hint={confidence_hint:.2f}.",
+    )
+
+
+def _derive_reasoning_confidence_hint(
+    *,
+    unique_count: int,
+    span: int,
+    average_step: float,
+    tonal_overlap: float,
+) -> float:
+    richness = min(1.0, unique_count / 10.0)
+    melodic_span = min(1.0, span / 24.0)
+    smoothness = max(0.0, 1.0 - (abs(average_step - 2.8) / 8.0))
+    tonal = max(0.0, min(1.0, tonal_overlap))
+    return round((richness * 0.25) + (melodic_span * 0.2) + (smoothness * 0.2) + (tonal * 0.35), 3)
 
 
 
@@ -455,7 +619,9 @@ def _derive_melody_pitches(
     audio_bytes: bytes,
     estimated_duration_seconds: int,
     estimated_tempo_bpm: int,
+    tuning_settings: DashboardTuningSettings | None = None,
 ) -> tuple[int, ...]:
+    active_tuning = tuning_settings or _DEFAULT_TUNING_SETTINGS
     pcm_analysis = _extract_wav_pcm(audio_bytes=audio_bytes)
     if pcm_analysis is not None:
         inferred = _derive_melody_pitches_from_pcm(
@@ -463,6 +629,7 @@ def _derive_melody_pitches(
             sample_rate=pcm_analysis[1],
             estimated_duration_seconds=estimated_duration_seconds,
             estimated_tempo_bpm=estimated_tempo_bpm,
+            tuning_settings=active_tuning,
         )
         if inferred:
             return inferred
@@ -736,7 +903,9 @@ def _derive_melody_pitches_from_pcm(
     sample_rate: int,
     estimated_duration_seconds: int,
     estimated_tempo_bpm: int,
+    tuning_settings: DashboardTuningSettings | None = None,
 ) -> tuple[int, ...]:
+    active_tuning = tuning_settings or _DEFAULT_TUNING_SETTINGS
     onset_positions = _detect_pcm_onset_positions(samples=samples, sample_rate=sample_rate)
     if len(onset_positions) < 2:
         return ()
@@ -760,7 +929,11 @@ def _derive_melody_pitches_from_pcm(
         if len(analysis_window) < 32:
             continue
 
-        inferred_pitch = _infer_segment_pitch_midi(analysis_window=analysis_window, sample_rate=sample_rate)
+        inferred_pitch = _infer_segment_pitch_midi(
+            analysis_window=analysis_window,
+            sample_rate=sample_rate,
+            tuning_settings=active_tuning,
+        )
         if inferred_pitch is None:
             continue
         melody.append(inferred_pitch)
@@ -780,27 +953,31 @@ def _derive_melody_pitches_from_pcm(
     return tuple(padded)
 
 
-def _infer_segment_pitch_midi(*, analysis_window: list[int], sample_rate: int) -> int | None:
+def _infer_segment_pitch_midi(
+    *, analysis_window: list[int], sample_rate: int, tuning_settings: DashboardTuningSettings | None = None
+) -> int | None:
     if len(analysis_window) < 32 or sample_rate <= 0:
         return None
 
-    if _calculate_window_rms(analysis_window=analysis_window) < 5.0:
+    active_tuning = tuning_settings or _DEFAULT_TUNING_SETTINGS
+
+    if _calculate_window_rms(analysis_window=analysis_window) < active_tuning.rms_gate:
         return None
 
-    zero_crossing_frequency = _estimate_frequency_zero_crossing(analysis_window=analysis_window, sample_rate=sample_rate)
-    autocorrelation_frequency = _estimate_frequency_autocorrelation(analysis_window=analysis_window, sample_rate=sample_rate)
-    spectral_frequency = _estimate_frequency_spectral_peak(analysis_window=analysis_window, sample_rate=sample_rate)
+    zero_crossing_frequency = _estimate_frequency_zero_crossing(analysis_window=analysis_window, sample_rate=sample_rate, tuning_settings=active_tuning)
+    autocorrelation_frequency = _estimate_frequency_autocorrelation(analysis_window=analysis_window, sample_rate=sample_rate, tuning_settings=active_tuning)
+    spectral_frequency = _estimate_frequency_spectral_peak(analysis_window=analysis_window, sample_rate=sample_rate, tuning_settings=active_tuning)
 
     candidate_frequencies = [
         frequency
         for frequency in (zero_crossing_frequency, autocorrelation_frequency, spectral_frequency)
-        if frequency is not None and 40 <= frequency <= 2_000
+        if frequency is not None and active_tuning.min_frequency_hz <= frequency <= active_tuning.max_frequency_hz
     ]
     if not candidate_frequencies:
         return None
 
     if len(candidate_frequencies) >= 2:
-        clustered_frequencies = _cluster_frequency_candidates(candidate_frequencies=candidate_frequencies)
+        clustered_frequencies = _cluster_frequency_candidates(candidate_frequencies=candidate_frequencies, tuning_settings=active_tuning)
         if clustered_frequencies:
             frequency_hz = sum(clustered_frequencies) / len(clustered_frequencies)
         elif autocorrelation_frequency is not None:
@@ -815,10 +992,12 @@ def _infer_segment_pitch_midi(*, analysis_window: list[int], sample_rate: int) -
         frequency_hz = candidate_frequencies[0]
 
     midi_pitch = int(round(69 + (12 * math.log2(frequency_hz / 440.0))))
-    return max(36, min(96, midi_pitch))
+    return max(active_tuning.pitch_floor_midi, min(active_tuning.pitch_ceiling_midi, midi_pitch))
 
 
-def _estimate_frequency_zero_crossing(*, analysis_window: list[int], sample_rate: int) -> float | None:
+def _estimate_frequency_zero_crossing(
+    *, analysis_window: list[int], sample_rate: int, tuning_settings: DashboardTuningSettings | None = None
+) -> float | None:
     zero_crossings = 0
     previous_sign = analysis_window[0] >= 0
     for value in analysis_window[1:]:
@@ -831,12 +1010,15 @@ def _estimate_frequency_zero_crossing(*, analysis_window: list[int], sample_rate
         return None
 
     frequency_hz = (zero_crossings * sample_rate) / (2 * len(analysis_window))
-    if frequency_hz < 40 or frequency_hz > 2_000:
+    active_tuning = tuning_settings or _DEFAULT_TUNING_SETTINGS
+    if frequency_hz < active_tuning.min_frequency_hz or frequency_hz > active_tuning.max_frequency_hz:
         return None
     return frequency_hz
 
 
-def _estimate_frequency_autocorrelation(*, analysis_window: list[int], sample_rate: int) -> float | None:
+def _estimate_frequency_autocorrelation(
+    *, analysis_window: list[int], sample_rate: int, tuning_settings: DashboardTuningSettings | None = None
+) -> float | None:
     if len(analysis_window) < 64:
         return None
 
@@ -845,8 +1027,9 @@ def _estimate_frequency_autocorrelation(*, analysis_window: list[int], sample_ra
     if energy <= 0:
         return None
 
-    min_lag = max(2, int(sample_rate / 2_000))
-    max_lag = min(len(centered) // 2, int(sample_rate / 40))
+    active_tuning = tuning_settings or _DEFAULT_TUNING_SETTINGS
+    min_lag = max(2, int(sample_rate / active_tuning.max_frequency_hz))
+    max_lag = min(len(centered) // 2, int(sample_rate / active_tuning.min_frequency_hz))
     if min_lag >= max_lag:
         return None
 
@@ -885,12 +1068,14 @@ def _estimate_frequency_autocorrelation(*, analysis_window: list[int], sample_ra
 
     best_lag = min(viable_lags)
     frequency_hz = sample_rate / best_lag
-    if frequency_hz < 40 or frequency_hz > 2_000:
+    if frequency_hz < active_tuning.min_frequency_hz or frequency_hz > active_tuning.max_frequency_hz:
         return None
     return frequency_hz
 
 
-def _estimate_frequency_spectral_peak(*, analysis_window: list[int], sample_rate: int) -> float | None:
+def _estimate_frequency_spectral_peak(
+    *, analysis_window: list[int], sample_rate: int, tuning_settings: DashboardTuningSettings | None = None
+) -> float | None:
     if len(analysis_window) < 64:
         return None
 
@@ -900,8 +1085,9 @@ def _estimate_frequency_spectral_peak(*, analysis_window: list[int], sample_rate
     if total_energy <= 0:
         return None
 
-    min_frequency = 40
-    max_frequency = 2_000
+    active_tuning = tuning_settings or _DEFAULT_TUNING_SETTINGS
+    min_frequency = active_tuning.min_frequency_hz
+    max_frequency = active_tuning.max_frequency_hz
     max_bin = min(len(windowed) // 2, int((max_frequency * len(windowed)) / sample_rate))
     min_bin = max(1, int((min_frequency * len(windowed)) / sample_rate))
     if min_bin >= max_bin:
@@ -930,14 +1116,17 @@ def _estimate_frequency_spectral_peak(*, analysis_window: list[int], sample_rate
     return frequency_hz
 
 
-def _cluster_frequency_candidates(*, candidate_frequencies: list[float]) -> list[float]:
+def _cluster_frequency_candidates(
+    *, candidate_frequencies: list[float], tuning_settings: DashboardTuningSettings | None = None
+) -> list[float]:
     if len(candidate_frequencies) < 2:
         return candidate_frequencies
 
+    active_tuning = tuning_settings or _DEFAULT_TUNING_SETTINGS
     sorted_frequencies = sorted(candidate_frequencies)
     clusters: list[list[float]] = [[sorted_frequencies[0]]]
     for frequency in sorted_frequencies[1:]:
-        if abs(frequency - clusters[-1][-1]) <= 30:
+        if abs(frequency - clusters[-1][-1]) <= active_tuning.frequency_cluster_tolerance_hz:
             clusters[-1].append(frequency)
             continue
         clusters.append([frequency])
@@ -998,6 +1187,7 @@ def _build_transcription_text_with_analysis(
     profile: AudioAnalysisProfile,
 ) -> str:
     base = _build_transcription_text(audio_file=audio_file, mode=mode, stages=stages)
+    reasoning_lines = "\n".join(f"- {line}" for line in profile.reasoning_trace)
     return (
         f"{base}\n"
         "Audio analysis\n"
@@ -1008,7 +1198,10 @@ def _build_transcription_text_with_analysis(
         f"- Estimated key: {profile.estimated_key} major\n"
         f"- Derived note count: {len(profile.melody_pitches)}\n"
         f"- Melody MIDI pitches: {', '.join(str(p) for p in profile.melody_pitches)}\n"
+        "Reasoning trace\n"
+        f"{reasoning_lines or '- No additional reasoning captured.'}\n"
     )
+
 
 
 def _build_sheet_artifacts(
@@ -1077,6 +1270,7 @@ def _build_sheet_artifacts(
 
     artifacts: list[dict[str, str]] = []
     for artifact_name, extension, content_type, content in artifact_specs:
+        uploads_dir.mkdir(parents=True, exist_ok=True)
         artifact_path = uploads_dir / f"{job_id}_{stem}{extension}"
         artifact_path.write_bytes(content)
         artifacts.append(
@@ -1208,6 +1402,8 @@ def _render_page(
     default_mode: str,
     jobs: list[dict[str, Any]],
     editor_base_url: str,
+    tuning_settings: DashboardTuningSettings,
+    settings_path: str,
     message: str = "",
 ) -> str:
     rows = []
@@ -1272,6 +1468,24 @@ def _render_page(
   <p class='hint'>Owner: <strong>{html.escape(owner_id)}</strong>. Upload MP3/WAV/FLAC to run a full local transcription pipeline.</p>
   <p class='hint'>Editor app: <a href='{html.escape(editor_base_url)}' target='_blank' rel='noopener'>{html.escape(editor_base_url)}</a></p>
   {f"<div class='notice'>{html.escape(message)}</div>" if message else ''}
+  <form action='/settings' method='post'>
+    <h2>Settings</h2>
+    <p class='hint'>Loaded defaults from <code>{html.escape(settings_path)}</code>. Adjust tuning controls to steer pitch/chord inference behavior.</p>
+    <label for='rms_gate'>RMS gate:</label>
+    <input id='rms_gate' name='rms_gate' type='number' step='0.1' min='0.1' max='100' value='{tuning_settings.rms_gate}'/><br/><br/>
+    <label for='min_frequency_hz'>Min frequency (Hz):</label>
+    <input id='min_frequency_hz' name='min_frequency_hz' type='number' min='20' max='5000' value='{tuning_settings.min_frequency_hz}'/><br/><br/>
+    <label for='max_frequency_hz'>Max frequency (Hz):</label>
+    <input id='max_frequency_hz' name='max_frequency_hz' type='number' min='20' max='5000' value='{tuning_settings.max_frequency_hz}'/><br/><br/>
+    <label for='cluster_tolerance_hz'>Cluster tolerance (Hz):</label>
+    <input id='cluster_tolerance_hz' name='cluster_tolerance_hz' type='number' step='0.1' min='1' max='200' value='{tuning_settings.frequency_cluster_tolerance_hz}'/><br/><br/>
+    <label for='pitch_floor_midi'>Pitch floor (MIDI):</label>
+    <input id='pitch_floor_midi' name='pitch_floor_midi' type='number' min='0' max='127' value='{tuning_settings.pitch_floor_midi}'/><br/><br/>
+    <label for='pitch_ceiling_midi'>Pitch ceiling (MIDI):</label>
+    <input id='pitch_ceiling_midi' name='pitch_ceiling_midi' type='number' min='0' max='127' value='{tuning_settings.pitch_ceiling_midi}'/><br/><br/>
+    <button type='submit'>Save settings</button>
+  </form>
+
   <form action='/transcribe' method='post' enctype='multipart/form-data'>
     <label for='audio'>Audio file:</label><br/>
     <input id='audio' type='file' name='audio' accept='.mp3,.wav,.flac,audio/*' required/><br/><br/>
@@ -1303,12 +1517,15 @@ def serve_dashboard(*, config: DashboardServerConfig) -> None:
         "dashboard_api_skeleton", root / "modules" / "dashboard-api" / "src" / "dashboard_api_skeleton.py"
     )
 
+    tuning_defaults = _load_dashboard_tuning_defaults(path=_repo_root() / config.settings_path)
+
     state: dict[str, Any] = {
         "owner_id": config.owner_id,
         "default_mode": config.mode,
         "jobs": [],
         "uploads_dir": Path(tempfile.mkdtemp(prefix="transcriberator_uploads_")),
         "messages": {},
+        "tuning_settings": tuning_defaults,
     }
     api_service = dashboard_api.DashboardApiSkeleton()
     session = api_service.issue_access_token(owner_id=config.owner_id)
@@ -1336,6 +1553,8 @@ def serve_dashboard(*, config: DashboardServerConfig) -> None:
                 default_mode=state["default_mode"],
                 jobs=list(reversed(state["jobs"][-10:])),
                 editor_base_url=config.editor_base_url,
+                tuning_settings=state["tuning_settings"],
+                settings_path=config.settings_path,
                 message=message,
             )
             payload = html_content.encode("utf-8")
@@ -1403,6 +1622,9 @@ def serve_dashboard(*, config: DashboardServerConfig) -> None:
             if parsed.path == "/edit-transcription":
                 self._handle_edit_transcription()
                 return
+            if parsed.path == "/settings":
+                self._handle_update_settings()
+                return
 
             if parsed.path != "/transcribe":
                 self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
@@ -1453,6 +1675,37 @@ def serve_dashboard(*, config: DashboardServerConfig) -> None:
             msg_id = uuid.uuid4().hex
             state["messages"][msg_id] = f"Saved transcription edits for {job['audioFile']}."
             _redirect(self, f"/?msg={msg_id}")
+
+        def _handle_update_settings(self) -> None:
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                content_length = 0
+            if content_length <= 0:
+                self.send_error(HTTPStatus.BAD_REQUEST, "Missing form payload")
+                return
+
+            body = self.rfile.read(content_length).decode("utf-8", errors="ignore")
+            fields = parse_qs(body, keep_blank_values=True)
+
+            raw_values = {
+                "rmsGate": fields.get("rms_gate", [str(state["tuning_settings"].rms_gate)])[0],
+                "minFrequencyHz": fields.get("min_frequency_hz", [str(state["tuning_settings"].min_frequency_hz)])[0],
+                "maxFrequencyHz": fields.get("max_frequency_hz", [str(state["tuning_settings"].max_frequency_hz)])[0],
+                "frequencyClusterToleranceHz": fields.get("cluster_tolerance_hz", [str(state["tuning_settings"].frequency_cluster_tolerance_hz)])[0],
+                "pitchFloorMidi": fields.get("pitch_floor_midi", [str(state["tuning_settings"].pitch_floor_midi)])[0],
+                "pitchCeilingMidi": fields.get("pitch_ceiling_midi", [str(state["tuning_settings"].pitch_ceiling_midi)])[0],
+            }
+            state["tuning_settings"] = _normalize_tuning_settings(raw_values)
+
+            msg_id = uuid.uuid4().hex
+            state["messages"][msg_id] = (
+                "Saved settings. "
+                f"RMS gate={state['tuning_settings'].rms_gate}, "
+                f"freq={state['tuning_settings'].min_frequency_hz}-{state['tuning_settings'].max_frequency_hz} Hz, "
+                f"MIDI range={state['tuning_settings'].pitch_floor_midi}-{state['tuning_settings'].pitch_ceiling_midi}."
+            )
+            _redirect(self, f"/?{urlencode({'msg': msg_id})}")
 
         def _handle_transcribe(self, *, body: bytes, boundary: bytes) -> str:
             parts = [part for part in body.split(b"--" + boundary) if part and part not in {b"--\r\n", b"--"}]
@@ -1511,7 +1764,11 @@ def serve_dashboard(*, config: DashboardServerConfig) -> None:
                 "finalStatus": result.final_status.value,
                 "stages": [{**asdict(record), "status": record.status.value} for record in result.stage_records],
             }
-            profile = _analyze_audio_bytes(audio_file=safe_filename, audio_bytes=file_bytes)
+            profile = _analyze_audio_bytes(
+                audio_file=safe_filename,
+                audio_bytes=file_bytes,
+                tuning_settings=state["tuning_settings"],
+            )
             transcription_text = _build_transcription_text_with_analysis(
                 audio_file=safe_filename,
                 mode=normalized_mode,
@@ -1528,6 +1785,7 @@ def serve_dashboard(*, config: DashboardServerConfig) -> None:
                 transcription_text=transcription_text,
                 artifacts=artifacts,
             )
+            state["uploads_dir"].mkdir(parents=True, exist_ok=True)
             transcription_path = state["uploads_dir"] / f"{job.id}_transcription.txt"
             transcription_path.write_text(transcription_text, encoding="utf-8")
             summary["transcriptionPath"] = str(transcription_path)
@@ -1585,6 +1843,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", default="127.0.0.1", help="Dashboard bind host.")
     parser.add_argument("--port", type=int, default=4173, help="Dashboard bind port.")
     parser.add_argument("--editor-url", default="http://127.0.0.1:3000", help="Base URL for the editor app.")
+    parser.add_argument("--settings-path", default=_DEFAULT_DASHBOARD_SETTINGS_PATH, help="Relative path to dashboard settings JSON file.")
     return parser
 
 
@@ -1619,6 +1878,7 @@ def main(argv: list[str] | None = None) -> int:
             mode=_validate_mode(args.mode),
             allow_hq_degradation=not args.no_hq_degradation,
             editor_base_url=args.editor_url,
+            settings_path=args.settings_path,
         )
         serve_dashboard(config=config)
     except StartupError as exc:

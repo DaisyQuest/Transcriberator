@@ -113,4 +113,6 @@ Implementation checklist mirroring `Final_Spec.md`. Every item has a unique chec
 - [x] WC-TASK-024: Fix `samples/melody.mp3` parsing regression with independent melody derivation (no hash override), harden upload directory recreation during transcription POST handling, and add exhaustive unit regression coverage for compressed-analysis branches.
 - [x] WC-TASK-025: Increase local pitch-detection robustness with hybrid PCM frequency inference, contour smoothing, and exhaustive regression tests for new branch paths.
 - [x] WC-TASK-026: Improve local transcription detection with multi-layer frequency inference (RMS gating, spectral peak analysis, candidate clustering), plus exhaustive branch-focused regression tests.
-
+- [x] WC-TASK-027: Improve worker-transcription pitch isolation to identify chord qualities from polyphonic frames, emit isolated pitch/chord metadata, and add exhaustive branch-focused unit coverage.
+- [x] WC-TASK-028: Add a local dashboard Settings panel backed by predictable file-based tuning defaults, wire tuning controls into pitch inference, and expand exhaustive entrypoint branch coverage.
+- [x] WC-TASK-029: Expand transcription output with explicit reasoning trace diagnostics (tuning, melody evidence, contour evidence, confidence hint) and exhaustive branch coverage tests.

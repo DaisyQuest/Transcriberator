@@ -1,0 +1,10 @@
+{
+  "tuning": {
+    "rmsGate": 5.0,
+    "minFrequencyHz": 40,
+    "maxFrequencyHz": 2000,
+    "frequencyClusterToleranceHz": 30.0,
+    "pitchFloorMidi": 36,
+    "pitchCeilingMidi": 96
+  }
+}
