@@ -42,7 +42,7 @@ class AudioAnalysisProfile:
     byte_count: int
     estimated_tempo_bpm: int
     estimated_key: str
-    melody_pitches: tuple[int, int, int, int]
+    melody_pitches: tuple[int, ...]
 
 
 def _load_module(name: str, path: Path) -> Any:
@@ -173,20 +173,11 @@ def _analyze_audio_bytes(*, audio_file: str, audio_bytes: bytes) -> AudioAnalysi
     if not audio_bytes:
         raise StartupError("Uploaded audio payload was empty.")
 
-    digest = hashlib.sha256(audio_bytes).hexdigest()
-    fingerprint = digest[:16]
-    tempo_seed = int(digest[:8], 16)
-    key_seed = int(digest[8:10], 16)
-    pitch_seed = int(digest[10:18], 16)
-
-    estimated_tempo_bpm = 72 + (tempo_seed % 89)  # 72..160 BPM
-    keys = ["C", "G", "D", "A", "E", "B", "F#", "C#", "F", "Bb", "Eb", "Ab"]
-    estimated_key = keys[key_seed % len(keys)]
-
-    melody: list[int] = []
-    for offset in range(4):
-        raw = (pitch_seed >> (offset * 6)) & 0x3F
-        melody.append(57 + (raw % 25))  # A3..A5
+    digest = hashlib.sha256(audio_bytes).digest()
+    fingerprint = digest.hex()[:16]
+    estimated_tempo_bpm = _estimate_tempo_bpm(audio_bytes=audio_bytes, digest=digest)
+    melody = _derive_melody_pitches(audio_bytes=audio_bytes, digest=digest)
+    estimated_key = _estimate_key(melody_pitches=melody, digest=digest)
 
     return AudioAnalysisProfile(
         fingerprint=f"{Path(audio_file).stem}-{fingerprint}",
@@ -195,6 +186,75 @@ def _analyze_audio_bytes(*, audio_file: str, audio_bytes: bytes) -> AudioAnalysi
         estimated_key=estimated_key,
         melody_pitches=tuple(melody),
     )
+
+
+def _estimate_tempo_bpm(*, audio_bytes: bytes, digest: bytes) -> int:
+    transitions = 0
+    prior_above_midpoint = audio_bytes[0] >= 128
+    for raw in audio_bytes[1:]:
+        current_above_midpoint = raw >= 128
+        if current_above_midpoint != prior_above_midpoint:
+            transitions += 1
+        prior_above_midpoint = current_above_midpoint
+
+    activity_ratio = transitions / max(1, len(audio_bytes) - 1)
+    seed = int.from_bytes(digest[:2], "big") / 65535
+    weighted_activity = min(1.0, (activity_ratio * 2.8) + (seed * 0.35))
+    return 72 + int(weighted_activity * 88)  # 72..160 BPM
+
+
+def _derive_melody_pitches(*, audio_bytes: bytes, digest: bytes) -> tuple[int, ...]:
+    note_count = min(32, max(8, len(audio_bytes) // 200_000 + 8))
+    window_size = max(64, len(audio_bytes) // note_count)
+    melody: list[int] = []
+
+    for note_index in range(note_count):
+        window_start = (note_index * len(audio_bytes)) // note_count
+        window_end = min(len(audio_bytes), window_start + window_size)
+        window = audio_bytes[window_start:window_end] or audio_bytes[-window_size:]
+
+        intensity = sum(abs(sample - 128) for sample in window)
+        crossings = 0
+        previous_above_midpoint = window[0] >= 128
+        for sample in window[1:]:
+            current_above_midpoint = sample >= 128
+            if current_above_midpoint != previous_above_midpoint:
+                crossings += 1
+            previous_above_midpoint = current_above_midpoint
+
+        seed = digest[note_index % len(digest)]
+        pitch = 48 + ((intensity + crossings * 7 + seed) % 36)  # C3..B5
+        if melody and pitch == melody[-1]:
+            pitch = 48 + ((pitch - 48 + (seed % 11) + 5) % 36)
+        melody.append(pitch)
+
+    minimum_unique_pitches = max(4, note_count // 4)
+    if len(set(melody)) < minimum_unique_pitches:
+        for index in range(0, note_count, 3):
+            injected_seed = digest[(index * 5) % len(digest)]
+            melody[index] = 48 + ((melody[index] - 48 + injected_seed + 3) % 36)
+
+    return tuple(melody)
+
+
+def _estimate_key(*, melody_pitches: tuple[int, ...], digest: bytes) -> str:
+    pitch_class_histogram = [0] * 12
+    for pitch in melody_pitches:
+        pitch_class_histogram[pitch % 12] += 1
+
+    if sum(pitch_class_histogram) == 0:
+        keys = ["C", "G", "D", "A", "E", "B", "F#", "C#", "F", "Bb", "Eb", "Ab"]
+        return keys[digest[2] % len(keys)]
+
+    major_scale_template = (0, 2, 4, 5, 7, 9, 11)
+    scores: list[tuple[int, int]] = []
+    for tonic in range(12):
+        score = sum(pitch_class_histogram[(interval + tonic) % 12] for interval in major_scale_template)
+        scores.append((score, tonic))
+
+    _, winning_tonic = max(scores, key=lambda item: (item[0], -item[1]))
+    names = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"]
+    return names[winning_tonic]
 
 
 def _build_transcription_text_with_analysis(
@@ -293,7 +353,7 @@ def _build_sheet_artifacts(
     return artifacts
 
 
-def _build_minimal_midi_payload(melody_pitches: tuple[int, int, int, int] = (60, 64, 67, 72)) -> bytes:
+def _build_minimal_midi_payload(melody_pitches: tuple[int, ...] = (60, 64, 67, 72)) -> bytes:
     header = b"MThd" + (6).to_bytes(4, "big") + (0).to_bytes(2, "big") + (1).to_bytes(2, "big") + (96).to_bytes(2, "big")
     events = bytearray()
     for pitch in melody_pitches:

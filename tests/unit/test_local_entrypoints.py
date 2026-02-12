@@ -164,6 +164,43 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
         self.assertNotEqual(profile_a.fingerprint, profile_b.fingerprint)
         self.assertNotEqual(profile_a.melody_pitches, profile_b.melody_pitches)
 
+    def test_analyze_audio_bytes_for_large_payload_produces_richer_melody(self):
+        payload = bytes((i * 37) % 256 for i in range(1_200_000))
+        profile = self.module._analyze_audio_bytes(audio_file='song.mp3', audio_bytes=payload)
+
+        self.assertGreaterEqual(len(profile.melody_pitches), 8)
+        self.assertGreaterEqual(len(set(profile.melody_pitches)), len(profile.melody_pitches) // 4)
+        self.assertTrue(all(48 <= pitch <= 83 for pitch in profile.melody_pitches))
+
+    def test_estimate_tempo_bpm_tracks_activity_level(self):
+        digest = b'\x01' * 32
+        low_activity = bytes([120] * 3000)
+        high_activity = bytes((0 if i % 2 == 0 else 255) for i in range(3000))
+
+        low_tempo = self.module._estimate_tempo_bpm(audio_bytes=low_activity, digest=digest)
+        high_tempo = self.module._estimate_tempo_bpm(audio_bytes=high_activity, digest=digest)
+
+        self.assertGreaterEqual(low_tempo, 72)
+        self.assertLessEqual(low_tempo, 160)
+        self.assertGreater(high_tempo, low_tempo)
+
+    def test_derive_melody_pitches_enforces_diversity_floor(self):
+        audio = bytes([130] * 900_000)
+        digest = b'\x00' * 32
+
+        melody = self.module._derive_melody_pitches(audio_bytes=audio, digest=digest)
+
+        self.assertEqual(len(melody), 12)
+        self.assertGreaterEqual(len(set(melody)), 4)
+
+    def test_estimate_key_handles_empty_histogram_fallback_branch(self):
+        self.assertEqual(self.module._estimate_key(melody_pitches=(), digest=b'\x00\x00\x07' + b'\x00' * 29), 'C#')
+
+    def test_estimate_key_prefers_best_major_scale_fit(self):
+        melody = (60, 62, 64, 65, 67, 69, 71, 72)
+        estimated_key = self.module._estimate_key(melody_pitches=melody, digest=b'\x00' * 32)
+        self.assertEqual(estimated_key, 'C')
+
     def test_analyze_audio_bytes_rejects_empty_payload(self):
         with self.assertRaisesRegex(self.module.StartupError, 'Uploaded audio payload was empty'):
             self.module._analyze_audio_bytes(audio_file='empty.mp3', audio_bytes=b'')
@@ -174,7 +211,7 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
             byte_count=128,
             estimated_tempo_bpm=120,
             estimated_key='D',
-            melody_pitches=(60, 62, 64, 65),
+            melody_pitches=(60, 62, 64, 65, 67, 69, 71, 72),
         )
         text = self.module._build_transcription_text_with_analysis(
             audio_file='clip.mp3',
@@ -187,7 +224,7 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
         self.assertIn('Fingerprint: demo-abc123', text)
         self.assertIn('Estimated tempo: 120 BPM', text)
         self.assertIn('Estimated key: D major', text)
-        self.assertIn('Melody MIDI pitches: 60, 62, 64, 65', text)
+        self.assertIn('Melody MIDI pitches: 60, 62, 64, 65, 67, 69, 71, 72', text)
 
     def test_build_sheet_artifacts_creates_expected_outputs(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -196,7 +233,7 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
                 byte_count=256,
                 estimated_tempo_bpm=108,
                 estimated_key='A',
-                melody_pitches=(61, 63, 66, 68),
+                melody_pitches=(61, 63, 66, 68, 70, 73, 75, 78),
             )
             artifacts = self.module._build_sheet_artifacts(
                 job_id='job_123',
@@ -235,6 +272,12 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
         self.assertNotEqual(midi_a, midi_b)
         self.assertIsNone(self.module._validate_midi_payload(midi_a))
         self.assertIsNone(self.module._validate_midi_payload(midi_b))
+
+    def test_midi_payload_builder_clamps_out_of_range_pitches(self):
+        midi = self.module._build_minimal_midi_payload((-5, 30, 140, 200))
+        self.assertIsNone(self.module._validate_midi_payload(midi))
+        self.assertIn(b'\x00', midi)
+        self.assertIn(b'\x7f', midi)
 
     def test_musicxml_payload_validation_success_and_failure(self):
         valid_xml = '<?xml version="1.0"?><score-partwise version="4.0"></score-partwise>'
