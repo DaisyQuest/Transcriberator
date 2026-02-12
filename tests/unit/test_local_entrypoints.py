@@ -251,6 +251,62 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
         self.assertLessEqual(low_tempo, 160)
         self.assertGreater(high_tempo, low_tempo)
 
+    @staticmethod
+    def _build_pulsed_melody_wav(*, bpm: int, midi_notes: tuple[int, ...], sample_rate: int = 8_000) -> bytes:
+        samples: list[int] = []
+        beat_samples = int(round(sample_rate * (60.0 / bpm)))
+        pulse_samples = max(1, int(beat_samples * 0.35))
+        for midi in midi_notes:
+            frequency_hz = 440.0 * (2 ** ((midi - 69) / 12.0))
+            for index in range(beat_samples):
+                if index >= pulse_samples:
+                    samples.append(128)
+                    continue
+                phase = (index / sample_rate) * frequency_hz
+                sample = 128 + int(90 if (phase % 1.0) < 0.5 else -90)
+                samples.append(max(0, min(255, sample)))
+
+        buffer = io.BytesIO()
+        with wave.open(buffer, 'wb') as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(1)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(bytes(samples))
+        return buffer.getvalue()
+
+    def test_estimate_tempo_bpm_prefers_pcm_for_structured_wav(self):
+        wav_payload = self._build_pulsed_melody_wav(
+            bpm=100,
+            midi_notes=(60, 60, 67, 67, 69, 69, 67, 65),
+        )
+
+        inferred = self.module._estimate_tempo_bpm(audio_bytes=wav_payload, digest=b'\x02' * 32)
+
+        self.assertGreaterEqual(inferred, 95)
+        self.assertLessEqual(inferred, 105)
+
+    def test_derive_melody_pitches_prefers_pcm_pitch_for_structured_wav(self):
+        melody = (60, 60, 67, 67, 69, 69, 67, 65)
+        wav_payload = self._build_pulsed_melody_wav(bpm=100, midi_notes=melody)
+
+        derived = self.module._derive_melody_pitches(
+            audio_bytes=wav_payload,
+            estimated_duration_seconds=8,
+            estimated_tempo_bpm=100,
+        )
+
+        self.assertGreaterEqual(len(derived), len(melody))
+        self.assertEqual(tuple(derived[:len(melody)]), melody)
+
+    def test_extract_wav_pcm_rejects_unsupported_sample_width(self):
+        buffer = io.BytesIO()
+        with wave.open(buffer, 'wb') as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(3)
+            wav_file.setframerate(8_000)
+            wav_file.writeframes(b'\x00\x00\x00' * 200)
+
+        self.assertIsNone(self.module._extract_wav_pcm(audio_bytes=buffer.getvalue()))
 
     def test_estimate_audio_duration_seconds_uses_wav_metadata(self):
         sample_rate = 8_000

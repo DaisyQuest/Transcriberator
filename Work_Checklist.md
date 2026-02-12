@@ -109,3 +109,5 @@ Implementation checklist mirroring `Final_Spec.md`. Every item has a unique chec
 - [x] WC-TASK-020: Calibrate local melody analysis for `samples/melody.mp3` so transcription emits the expected Ode-to-Joy phrase, with exhaustive regression tests for calibrated and fallback branches.
 - [x] WC-TASK-021: Generalize melody calibration from `samples/melody.mp3` into reference-instrument-aware correction for compatible recordings, with exhaustive entrypoint branch tests for candidate/fallback calibration behavior.
 - [x] WC-TASK-022: Remove hash-based melody calibration coupling, generalize adaptive melody interpretation for arbitrary uploads, and expand exhaustive branch coverage for the updated analysis pipeline.
+- [x] WC-TASK-023: Fix local audio analysis false-positive tempo/key/melody outputs by adding WAV PCM-aware tempo and melody inference with exhaustive regression branch tests for structured melodies and fallback paths.
+
