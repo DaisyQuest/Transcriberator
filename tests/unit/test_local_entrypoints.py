@@ -1,6 +1,7 @@
 import importlib.util
 import io
 import json
+import math
 import shutil
 import tempfile
 import xml.etree.ElementTree as ET
@@ -318,6 +319,79 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
             wav_file.setframerate(sample_rate)
             wav_file.writeframes(bytes(samples))
         return buffer.getvalue()
+
+
+    def test_estimate_frequency_zero_crossing_branches(self):
+        self.assertIsNone(
+            self.module._estimate_frequency_zero_crossing(
+                analysis_window=[0] * 128,
+                sample_rate=8_000,
+            )
+        )
+
+        alternating = [90 if index % 2 == 0 else -90 for index in range(128)]
+        self.assertIsNone(
+            self.module._estimate_frequency_zero_crossing(
+                analysis_window=alternating,
+                sample_rate=8_000,
+            )
+        )
+
+        sine_like = [int(80 * math.sin(2 * math.pi * 440 * (i / 8_000))) for i in range(256)]
+        inferred = self.module._estimate_frequency_zero_crossing(
+            analysis_window=sine_like,
+            sample_rate=8_000,
+        )
+        self.assertIsNotNone(inferred)
+        assert inferred is not None
+        self.assertGreater(inferred, 350)
+
+    def test_estimate_frequency_autocorrelation_branches(self):
+        self.assertIsNone(
+            self.module._estimate_frequency_autocorrelation(
+                analysis_window=[1] * 128,
+                sample_rate=8_000,
+            )
+        )
+        self.assertIsNone(
+            self.module._estimate_frequency_autocorrelation(
+                analysis_window=[90, -90] * 8,
+                sample_rate=8_000,
+            )
+        )
+
+        sine_like = [int(80 * math.sin(2 * math.pi * 440 * (i / 8_000))) for i in range(256)]
+        inferred = self.module._estimate_frequency_autocorrelation(
+            analysis_window=sine_like,
+            sample_rate=8_000,
+        )
+        self.assertIsNotNone(inferred)
+        assert inferred is not None
+        self.assertGreater(inferred, 400)
+        self.assertLess(inferred, 500)
+
+    def test_infer_segment_pitch_midi_prefers_autocorrelation_when_zcr_diverges(self):
+        sine_like = [int(80 * math.sin(2 * math.pi * 220 * (i / 8_000))) for i in range(320)]
+        inferred_pitch = self.module._infer_segment_pitch_midi(
+            analysis_window=sine_like,
+            sample_rate=8_000,
+        )
+        self.assertIsNotNone(inferred_pitch)
+        assert inferred_pitch is not None
+        self.assertGreaterEqual(inferred_pitch, 56)
+        self.assertLessEqual(inferred_pitch, 58)
+
+    def test_infer_segment_pitch_midi_returns_none_without_candidates(self):
+        inferred = self.module._infer_segment_pitch_midi(
+            analysis_window=[0] * 96,
+            sample_rate=8_000,
+        )
+        self.assertIsNone(inferred)
+
+    def test_smooth_detected_melody_branches(self):
+        self.assertEqual(self.module._smooth_detected_melody(melody=[60, 62]), [60, 62])
+        smoothed = self.module._smooth_detected_melody(melody=[60, 84, 61, 63])
+        self.assertEqual(smoothed[1], 60)
 
     def test_estimate_tempo_bpm_prefers_pcm_for_structured_wav(self):
         wav_payload = self._build_pulsed_melody_wav(
