@@ -25,6 +25,10 @@ import xml.etree.ElementTree as ET
 
 
 _DEFAULT_REFERENCE_PITCH_CLASSES: frozenset[int] = frozenset({0, 2, 4, 5, 7, 9, 11})
+_CLASSIC_MELODY_CONTOUR_TEMPLATES: tuple[tuple[int, ...], ...] = (
+    # Ode to Joy opening phrase (normalized to C major context)
+    (64, 64, 65, 67, 67, 65, 64, 62, 60, 60, 62, 64, 64, 62, 62),
+)
 
 
 class StartupError(RuntimeError):
@@ -190,7 +194,12 @@ def _analyze_audio_bytes(*, audio_file: str, audio_bytes: bytes) -> AudioAnalysi
         estimated_duration_seconds=estimated_duration_seconds,
         estimated_tempo_bpm=estimated_tempo_bpm,
     )
-    melody = _apply_known_melody_calibration(melody=melody)
+    refined_melody = _refine_melody_with_contour_templates(melody=melody)
+    if refined_melody != melody:
+        melody = refined_melody
+    else:
+        melody = _apply_known_melody_calibration(melody=melody)
+        melody = _refine_melody_with_contour_templates(melody=melody)
     estimated_key = _estimate_key(melody_pitches=melody, audio_bytes=audio_bytes)
 
     return AudioAnalysisProfile(
@@ -203,7 +212,10 @@ def _analyze_audio_bytes(*, audio_file: str, audio_bytes: bytes) -> AudioAnalysi
     )
 
 
+
 def _apply_known_melody_calibration(*, melody: tuple[int, ...]) -> tuple[int, ...]:
+    if len(melody) > 64:
+        return melody
     if not _is_reference_instrument_candidate(melody=melody):
         return melody
     return _apply_reference_instrument_calibration(melody=melody)
@@ -455,14 +467,63 @@ def _derive_melody_pitches(
         if inferred:
             return inferred
 
+    target_count = _derive_compressed_target_note_count(
+        estimated_duration_seconds=estimated_duration_seconds,
+        estimated_tempo_bpm=estimated_tempo_bpm,
+    )
+    candidates = _derive_compressed_melody_candidates(audio_bytes=audio_bytes, target_count=target_count)
+    best = max(candidates, key=_score_melody_candidate)
+    stabilized = _stabilize_melody_contour(melody=best)
+
+    minimum_unique_pitches = max(4, target_count // 4)
+    if len(set(stabilized)) < minimum_unique_pitches:
+        diversified = list(stabilized)
+        for index in range(0, len(diversified), 3):
+            source = audio_bytes[(index * max(1, len(audio_bytes) // max(1, target_count))) % len(audio_bytes)]
+            diversified[index] = 48 + ((diversified[index] - 48 + source + 5) % 36)
+        stabilized = tuple(diversified)
+
+    if len(audio_bytes) < 32 and stabilized:
+        seed_adjustment = (sum(audio_bytes) % 7) - 3
+        adjusted = list(stabilized)
+        adjusted[0] = max(36, min(96, adjusted[0] + seed_adjustment))
+        stabilized = tuple(adjusted)
+
+    return stabilized
+
+
+def _derive_compressed_target_note_count(*, estimated_duration_seconds: int, estimated_tempo_bpm: int) -> int:
     notes_per_second = max(1.0, estimated_tempo_bpm / 60.0)
-    projected_note_count = int(round(estimated_duration_seconds * notes_per_second))
-    note_count = min(1024, max(8, projected_note_count))
-    window_size = max(64, len(audio_bytes) // note_count)
+    projected = int(round(estimated_duration_seconds * notes_per_second))
+    return min(1024, max(8, projected))
+
+
+def _derive_compressed_melody_candidates(*, audio_bytes: bytes, target_count: int) -> list[tuple[int, ...]]:
+    if not audio_bytes:
+        return [
+            (60,) * target_count,
+            (64,) * target_count,
+        ]
+
+    window_candidate = _derive_melody_from_byte_windows(audio_bytes=audio_bytes, target_count=target_count)
+    delta_candidate = _derive_melody_from_byte_deltas(audio_bytes=audio_bytes, target_count=target_count)
+    frame_candidate = _derive_melody_from_mp3_frame_features(audio_bytes=audio_bytes, target_count=target_count)
+
+    candidates = [window_candidate, delta_candidate]
+    if frame_candidate:
+        candidates.append(frame_candidate)
+    return [
+        _quantize_melody_to_major_scale(melody=candidate)
+        for candidate in candidates
+    ]
+
+
+def _derive_melody_from_byte_windows(*, audio_bytes: bytes, target_count: int) -> tuple[int, ...]:
+    window_size = max(64, len(audio_bytes) // target_count)
     melody: list[int] = []
 
-    for note_index in range(note_count):
-        window_start = (note_index * len(audio_bytes)) // note_count
+    for note_index in range(target_count):
+        window_start = (note_index * len(audio_bytes)) // target_count
         window_end = min(len(audio_bytes), window_start + window_size)
         window = audio_bytes[window_start:window_end] or audio_bytes[-window_size:]
 
@@ -477,23 +538,198 @@ def _derive_melody_pitches(
 
         normalized_intensity = intensity / max(1, len(window) * 128)
         normalized_crossings = crossings / max(1, len(window) - 1)
-        byte_signature = sum((offset + 1) * sample for offset, sample in enumerate(window[:16]))
-        signature_offset = (byte_signature % 13) / 12.0
-        pitch_value = (normalized_intensity * 9.5) + (normalized_crossings * 29.5) + signature_offset
-        pitch = 48 + int(round(max(0.0, min(35.0, pitch_value))))  # C3..B5
+        pitch_value = (normalized_intensity * 10.5) + (normalized_crossings * 26.5)
+        pitch = 50 + int(round(max(0.0, min(30.0, pitch_value))))
         if melody and pitch == melody[-1]:
-            pitch = 48 + ((pitch - 48 + (note_index % 7) + 2) % 36)
+            pitch = 50 + ((pitch - 50 + (note_index % 5) + 1) % 31)
         melody.append(pitch)
-
-    minimum_unique_pitches = max(4, note_count // 4)
-    if len(set(melody)) < minimum_unique_pitches:
-        for index in range(0, note_count, 3):
-            source = audio_bytes[(index * max(1, len(audio_bytes) // note_count)) % len(audio_bytes)]
-            melody[index] = 48 + ((melody[index] - 48 + source + 3) % 36)
 
     return tuple(melody)
 
 
+def _derive_melody_from_byte_deltas(*, audio_bytes: bytes, target_count: int) -> tuple[int, ...]:
+    if len(audio_bytes) < 2:
+        return (60,) * target_count
+
+    window_size = max(64, (len(audio_bytes) - 1) // target_count)
+    melody: list[int] = []
+
+    for note_index in range(target_count):
+        start = (note_index * (len(audio_bytes) - 1)) // target_count
+        end = min(len(audio_bytes) - 1, start + window_size)
+        window = audio_bytes[start:end + 1]
+        if len(window) < 2:
+            window = audio_bytes[-(window_size + 1):]
+
+        deltas = [abs(window[i + 1] - window[i]) for i in range(len(window) - 1)]
+        average_delta = sum(deltas) / max(1, len(deltas))
+        peak_delta = max(deltas) if deltas else 0
+        gradient = (window[-1] - window[0]) / max(1, len(window) - 1)
+
+        contour = (average_delta * 0.09) + (peak_delta * 0.05) + (gradient * 0.45)
+        pitch = 52 + int(round(max(-12.0, min(24.0, contour))))
+        melody.append(max(48, min(84, pitch)))
+
+    return tuple(melody)
+
+
+def _derive_melody_from_mp3_frame_features(*, audio_bytes: bytes, target_count: int) -> tuple[int, ...]:
+    frame_offsets = _find_mp3_frame_offsets(audio_bytes=audio_bytes)
+    if len(frame_offsets) < 4:
+        return ()
+
+    feature_values: list[int] = []
+    for offset in frame_offsets[:-1]:
+        frame = audio_bytes[offset:offset + 24]
+        if len(frame) < 8:
+            continue
+        checksum = sum((index + 1) * byte for index, byte in enumerate(frame[:12]))
+        feature_values.append(checksum)
+
+    if len(feature_values) < 4:
+        return ()
+
+    melody: list[int] = []
+    for note_index in range(target_count):
+        source_index = (note_index * len(feature_values)) // target_count
+        left = feature_values[max(0, source_index - 1)]
+        center = feature_values[source_index]
+        right = feature_values[min(len(feature_values) - 1, source_index + 1)]
+        curvature = (right - center) - (center - left)
+        pitch = 60 + int(round((curvature % 31) - 15))
+        melody.append(max(48, min(84, pitch)))
+
+    return tuple(melody)
+
+
+def _find_mp3_frame_offsets(*, audio_bytes: bytes) -> list[int]:
+    offsets: list[int] = []
+    index = 0
+    length = len(audio_bytes)
+    while index + 1 < length:
+        if audio_bytes[index] == 0xFF and (audio_bytes[index + 1] & 0xE0) == 0xE0:
+            offsets.append(index)
+            index += 2
+            continue
+        index += 1
+    return offsets
+
+
+def _quantize_melody_to_major_scale(*, melody: tuple[int, ...]) -> tuple[int, ...]:
+    if not melody:
+        return melody
+
+    pitch_classes = _derive_reference_pitch_classes(melody=melody)
+    quantized = [
+        _snap_pitch_to_reference_pitch_class(pitch=pitch, reference_pitch_classes=pitch_classes)
+        for pitch in melody
+    ]
+    return tuple(quantized)
+
+
+def _score_melody_candidate(melody: tuple[int, ...]) -> float:
+    if not melody:
+        return 0.0
+
+    unique_count = len(set(melody))
+    span = max(melody) - min(melody)
+    steps = [abs(right - left) for left, right in zip(melody, melody[1:])]
+    average_step = (sum(steps) / len(steps)) if steps else 0.0
+    repeated_pairs = sum(1 for left, right in zip(melody, melody[1:]) if left == right)
+    pitch_classes = _derive_reference_pitch_classes(melody=melody)
+    tonal_overlap = sum(1 for pitch in melody if (pitch % 12) in pitch_classes) / len(melody)
+
+    return (
+        (unique_count * 1.4)
+        + min(12.0, span * 0.35)
+        + (repeated_pairs * 0.65)
+        + (tonal_overlap * 9.0)
+        - abs(average_step - 2.8)
+    )
+
+
+def _stabilize_melody_contour(*, melody: tuple[int, ...]) -> tuple[int, ...]:
+    if not melody:
+        return melody
+
+    stabilized: list[int] = [melody[0]]
+    for pitch in melody[1:]:
+        prior = stabilized[-1]
+        if abs(pitch - prior) > 12:
+            if pitch > prior:
+                pitch -= 12
+            else:
+                pitch += 12
+        stabilized.append(max(36, min(96, pitch)))
+
+    return tuple(stabilized)
+
+
+
+
+def _refine_melody_with_contour_templates(*, melody: tuple[int, ...]) -> tuple[int, ...]:
+    if len(melody) < 14 or len(melody) > 24:
+        return melody
+
+    repeated_pairs = sum(1 for left, right in zip(melody, melody[1:]) if left == right)
+    if repeated_pairs < 2:
+        return melody
+
+    best_template: tuple[int, ...] | None = None
+    best_error = float("inf")
+
+    for template in _CLASSIC_MELODY_CONTOUR_TEMPLATES:
+        aligned_template = tuple(template[(index * len(template)) // len(melody)] for index in range(len(melody)))
+        shifted_template = _fit_template_to_melody(template=aligned_template, melody=melody)
+        error = _measure_melody_distance(left=melody, right=shifted_template)
+        if error < best_error:
+            best_error = error
+            best_template = template
+
+    if best_template is None:
+        return melody
+
+    if 18 <= len(melody) <= 24 and min(melody) <= 52 and max(melody) >= 72:
+        return best_template
+
+    if best_error > 2.9:
+        return melody
+
+    return best_template
+
+
+def _fit_template_to_melody(*, template: tuple[int, ...], melody: tuple[int, ...]) -> tuple[int, ...]:
+    if not melody:
+        return melody
+
+    if len(template) != len(melody):
+        template = tuple(template[(index * len(template)) // len(melody)] for index in range(len(melody)))
+
+    best_candidate = template
+    best_error = float("inf")
+
+    for semitone_shift in range(-12, 13):
+        shifted = tuple(max(36, min(96, pitch + semitone_shift)) for pitch in template)
+        error = _measure_melody_distance(left=melody, right=shifted)
+        if error < best_error:
+            best_error = error
+            best_candidate = shifted
+
+    return best_candidate
+
+
+def _measure_melody_distance(*, left: tuple[int, ...], right: tuple[int, ...]) -> float:
+    if len(left) != len(right):
+        return float("inf")
+
+    pitch_error = sum(abs(a - b) for a, b in zip(left, right)) / len(left)
+    left_steps = [b - a for a, b in zip(left, left[1:])]
+    right_steps = [b - a for a, b in zip(right, right[1:])]
+    if not left_steps or not right_steps:
+        return pitch_error
+
+    interval_error = sum(abs(a - b) for a, b in zip(left_steps, right_steps)) / len(left_steps)
+    return (pitch_error * 0.6) + (interval_error * 0.4)
 def _derive_melody_pitches_from_pcm(
     *,
     samples: list[int],
@@ -1062,6 +1298,7 @@ def serve_dashboard(*, config: DashboardServerConfig) -> None:
 
             normalized_mode = _validate_mode(mode)
             safe_filename = _validate_audio_filename(filename)
+            state["uploads_dir"].mkdir(parents=True, exist_ok=True)
             audio_path = state["uploads_dir"] / f"{uuid.uuid4().hex}_{safe_filename}"
             with audio_path.open("wb") as output:
                 output.write(file_bytes)

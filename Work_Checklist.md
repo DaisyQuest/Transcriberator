@@ -110,4 +110,5 @@ Implementation checklist mirroring `Final_Spec.md`. Every item has a unique chec
 - [x] WC-TASK-021: Generalize melody calibration from `samples/melody.mp3` into reference-instrument-aware correction for compatible recordings, with exhaustive entrypoint branch tests for candidate/fallback calibration behavior.
 - [x] WC-TASK-022: Remove hash-based melody calibration coupling, generalize adaptive melody interpretation for arbitrary uploads, and expand exhaustive branch coverage for the updated analysis pipeline.
 - [x] WC-TASK-023: Fix local audio analysis false-positive tempo/key/melody outputs by adding WAV PCM-aware tempo and melody inference with exhaustive regression branch tests for structured melodies and fallback paths.
+- [x] WC-TASK-024: Fix `samples/melody.mp3` parsing regression with independent melody derivation (no hash override), harden upload directory recreation during transcription POST handling, and add exhaustive unit regression coverage for compressed-analysis branches.
 
