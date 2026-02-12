@@ -23,40 +23,7 @@ import wave
 import xml.etree.ElementTree as ET
 
 
-_KNOWN_MELODY_CALIBRATIONS: dict[str, tuple[int, ...]] = {
-    # samples/melody.mp3 -> "Ode to Joy" opening phrase
-    "362db11fe11cc6d547696ef8ff59145a5b10ae02d93b54623440d789b623efd2": (
-        64,
-        64,
-        65,
-        67,
-        67,
-        65,
-        64,
-        62,
-        60,
-        60,
-        62,
-        64,
-        64,
-        62,
-        62,
-    ),
-}
-
-_REFERENCE_INSTRUMENT_PITCH_CLASSES: frozenset[int] = frozenset(
-    pitch % 12
-    for calibrated_melody in _KNOWN_MELODY_CALIBRATIONS.values()
-    for pitch in calibrated_melody
-)
-_REFERENCE_INSTRUMENT_CENTROID: float = (
-    sum(
-        pitch
-        for calibrated_melody in _KNOWN_MELODY_CALIBRATIONS.values()
-        for pitch in calibrated_melody
-    )
-    / max(1, sum(len(calibrated_melody) for calibrated_melody in _KNOWN_MELODY_CALIBRATIONS.values()))
-)
+_DEFAULT_REFERENCE_PITCH_CLASSES: frozenset[int] = frozenset({0, 2, 4, 5, 7, 9, 11})
 
 
 class StartupError(RuntimeError):
@@ -219,12 +186,11 @@ def _analyze_audio_bytes(*, audio_file: str, audio_bytes: bytes) -> AudioAnalysi
     estimated_tempo_bpm = _estimate_tempo_bpm(audio_bytes=audio_bytes, digest=digest)
     melody = _derive_melody_pitches(
         audio_bytes=audio_bytes,
-        digest=digest,
         estimated_duration_seconds=estimated_duration_seconds,
         estimated_tempo_bpm=estimated_tempo_bpm,
     )
-    melody = _apply_known_melody_calibration(digest=digest, melody=melody)
-    estimated_key = _estimate_key(melody_pitches=melody, digest=digest)
+    melody = _apply_known_melody_calibration(melody=melody)
+    estimated_key = _estimate_key(melody_pitches=melody, audio_bytes=audio_bytes)
 
     return AudioAnalysisProfile(
         fingerprint=f"{Path(audio_file).stem}-{fingerprint}",
@@ -236,10 +202,7 @@ def _analyze_audio_bytes(*, audio_file: str, audio_bytes: bytes) -> AudioAnalysi
     )
 
 
-def _apply_known_melody_calibration(*, digest: bytes, melody: tuple[int, ...]) -> tuple[int, ...]:
-    calibrated = _KNOWN_MELODY_CALIBRATIONS.get(digest.hex())
-    if calibrated is not None:
-        return calibrated
+def _apply_known_melody_calibration(*, melody: tuple[int, ...]) -> tuple[int, ...]:
     if not _is_reference_instrument_candidate(melody=melody):
         return melody
     return _apply_reference_instrument_calibration(melody=melody)
@@ -249,10 +212,26 @@ def _is_reference_instrument_candidate(*, melody: tuple[int, ...]) -> bool:
     if len(melody) < 4:
         return False
 
-    overlap_ratio = sum(1 for pitch in melody if (pitch % 12) in _REFERENCE_INSTRUMENT_PITCH_CLASSES) / len(melody)
+    pitch_classes = _derive_reference_pitch_classes(melody=melody)
+    overlap_ratio = sum(1 for pitch in melody if (pitch % 12) in pitch_classes) / len(melody)
+    span = max(melody) - min(melody)
     centroid = sum(melody) / len(melody)
-    centroid_distance = abs(centroid - _REFERENCE_INSTRUMENT_CENTROID)
-    return overlap_ratio >= 0.55 and centroid_distance <= 18
+    return overlap_ratio >= 0.65 and 36 <= centroid <= 90 and span >= 5
+
+
+def _derive_reference_pitch_classes(*, melody: tuple[int, ...]) -> frozenset[int]:
+    if not melody:
+        return _DEFAULT_REFERENCE_PITCH_CLASSES
+
+    histogram = [0] * 12
+    for pitch in melody:
+        histogram[pitch % 12] += 1
+
+    ranked_pitch_classes = sorted(range(12), key=lambda pitch_class: (-histogram[pitch_class], pitch_class))
+    dominant = {pitch_class for pitch_class in ranked_pitch_classes[:7] if histogram[pitch_class] > 0}
+    if len(dominant) < 5:
+        return _DEFAULT_REFERENCE_PITCH_CLASSES
+    return frozenset(dominant)
 
 
 def _apply_reference_instrument_calibration(*, melody: tuple[int, ...]) -> tuple[int, ...]:
@@ -261,6 +240,8 @@ def _apply_reference_instrument_calibration(*, melody: tuple[int, ...]) -> tuple
 
     pitch_floor = 36
     pitch_ceiling = 96
+    reference_pitch_classes = _derive_reference_pitch_classes(melody=melody)
+    reference_centroid = sum(melody) / len(melody)
     corrected: list[int] = []
 
     for index, source_pitch in enumerate(melody):
@@ -274,8 +255,8 @@ def _apply_reference_instrument_calibration(*, melody: tuple[int, ...]) -> tuple
             candidates = [max(pitch_floor, min(pitch_ceiling, source_pitch))]
 
         def candidate_score(candidate_pitch: int) -> float:
-            class_penalty = 0.0 if (candidate_pitch % 12) in _REFERENCE_INSTRUMENT_PITCH_CLASSES else 1.5
-            center_penalty = abs(candidate_pitch - _REFERENCE_INSTRUMENT_CENTROID) * 0.45
+            class_penalty = 0.0 if (candidate_pitch % 12) in reference_pitch_classes else 1.5
+            center_penalty = abs(candidate_pitch - reference_centroid) * 0.25
             if index == 0:
                 return class_penalty + center_penalty
 
@@ -287,21 +268,29 @@ def _apply_reference_instrument_calibration(*, melody: tuple[int, ...]) -> tuple
         corrected.append(corrected_pitch)
 
     matching_pitch_class_ratio = (
-        sum(1 for pitch in corrected if (pitch % 12) in _REFERENCE_INSTRUMENT_PITCH_CLASSES) / len(corrected)
+        sum(1 for pitch in corrected if (pitch % 12) in reference_pitch_classes) / len(corrected)
     )
     if matching_pitch_class_ratio < 0.65:
-        corrected = [_snap_pitch_to_reference_pitch_class(pitch=pitch) for pitch in corrected]
+        corrected = [
+            _snap_pitch_to_reference_pitch_class(pitch=pitch, reference_pitch_classes=reference_pitch_classes)
+            for pitch in corrected
+        ]
 
     return tuple(corrected)
 
 
-def _snap_pitch_to_reference_pitch_class(*, pitch: int) -> int:
+def _snap_pitch_to_reference_pitch_class(
+    *,
+    pitch: int,
+    reference_pitch_classes: frozenset[int] | None = None,
+) -> int:
+    pitch_classes = _DEFAULT_REFERENCE_PITCH_CLASSES if reference_pitch_classes is None else reference_pitch_classes
     pitch_floor = 36
     pitch_ceiling = 96
     candidates = [
         candidate
         for candidate in (pitch - 2, pitch - 1, pitch, pitch + 1, pitch + 2)
-        if pitch_floor <= candidate <= pitch_ceiling and (candidate % 12) in _REFERENCE_INSTRUMENT_PITCH_CLASSES
+        if pitch_floor <= candidate <= pitch_ceiling and (candidate % 12) in pitch_classes
     ]
     if not candidates:
         return pitch
@@ -340,15 +329,15 @@ def _estimate_tempo_bpm(*, audio_bytes: bytes, digest: bytes) -> int:
         prior_above_midpoint = current_above_midpoint
 
     activity_ratio = transitions / max(1, len(audio_bytes) - 1)
-    seed = int.from_bytes(digest[:2], "big") / 65535
-    weighted_activity = min(1.0, (activity_ratio * 2.8) + (seed * 0.35))
+    signal_energy = sum(abs(sample - 128) for sample in audio_bytes) / max(1, len(audio_bytes))
+    normalized_energy = min(1.0, signal_energy / 128)
+    weighted_activity = min(1.0, (activity_ratio * 2.8) + (normalized_energy * 0.35))
     return 72 + int(weighted_activity * 88)  # 72..160 BPM
 
 
 def _derive_melody_pitches(
     *,
     audio_bytes: bytes,
-    digest: bytes,
     estimated_duration_seconds: int,
     estimated_tempo_bpm: int,
 ) -> tuple[int, ...]:
@@ -372,29 +361,34 @@ def _derive_melody_pitches(
                 crossings += 1
             previous_above_midpoint = current_above_midpoint
 
-        seed = digest[note_index % len(digest)]
-        pitch = 48 + ((intensity + crossings * 7 + seed) % 36)  # C3..B5
+        normalized_intensity = intensity / max(1, len(window) * 128)
+        normalized_crossings = crossings / max(1, len(window) - 1)
+        byte_signature = sum((offset + 1) * sample for offset, sample in enumerate(window[:16]))
+        signature_offset = (byte_signature % 13) / 12.0
+        pitch_value = (normalized_intensity * 9.5) + (normalized_crossings * 29.5) + signature_offset
+        pitch = 48 + int(round(max(0.0, min(35.0, pitch_value))))  # C3..B5
         if melody and pitch == melody[-1]:
-            pitch = 48 + ((pitch - 48 + (seed % 11) + 5) % 36)
+            pitch = 48 + ((pitch - 48 + (note_index % 7) + 2) % 36)
         melody.append(pitch)
 
     minimum_unique_pitches = max(4, note_count // 4)
     if len(set(melody)) < minimum_unique_pitches:
         for index in range(0, note_count, 3):
-            injected_seed = digest[(index * 5) % len(digest)]
-            melody[index] = 48 + ((melody[index] - 48 + injected_seed + 3) % 36)
+            source = audio_bytes[(index * max(1, len(audio_bytes) // note_count)) % len(audio_bytes)]
+            melody[index] = 48 + ((melody[index] - 48 + source + 3) % 36)
 
     return tuple(melody)
 
 
-def _estimate_key(*, melody_pitches: tuple[int, ...], digest: bytes) -> str:
+def _estimate_key(*, melody_pitches: tuple[int, ...], audio_bytes: bytes) -> str:
     pitch_class_histogram = [0] * 12
     for pitch in melody_pitches:
         pitch_class_histogram[pitch % 12] += 1
 
     if sum(pitch_class_histogram) == 0:
         keys = ["C", "G", "D", "A", "E", "B", "F#", "C#", "F", "Bb", "Eb", "Ab"]
-        return keys[digest[2] % len(keys)]
+        byte_seed = sum(audio_bytes[:64]) if audio_bytes else 0
+        return keys[byte_seed % len(keys)]
 
     major_scale_template = (0, 2, 4, 5, 7, 9, 11)
     scores: list[tuple[int, int]] = []

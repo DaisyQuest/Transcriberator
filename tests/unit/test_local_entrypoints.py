@@ -175,55 +175,51 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
         self.assertGreaterEqual(len(set(profile.melody_pitches)), 16)
         self.assertTrue(all(48 <= pitch <= 83 for pitch in profile.melody_pitches))
 
-    def test_analyze_audio_bytes_applies_known_melody_calibration_for_sample_fixture(self):
+    def test_analyze_audio_bytes_generalizes_calibration_for_sample_fixture(self):
         melody_bytes = (REPO_ROOT / 'samples' / 'melody.mp3').read_bytes()
 
         profile = self.module._analyze_audio_bytes(audio_file='melody.mp3', audio_bytes=melody_bytes)
 
-        self.assertEqual(
-            profile.melody_pitches,
-            (64, 64, 65, 67, 67, 65, 64, 62, 60, 60, 62, 64, 64, 62, 62),
-        )
-        self.assertEqual(
-            [self.module._midi_pitch_to_step(pitch) for pitch in profile.melody_pitches],
-            ['E', 'E', 'F', 'G', 'G', 'F', 'E', 'D', 'C', 'C', 'D', 'E', 'E', 'D', 'D'],
-        )
-
-    def test_apply_known_melody_calibration_returns_known_sequence(self):
-        digest = bytes.fromhex('362db11fe11cc6d547696ef8ff59145a5b10ae02d93b54623440d789b623efd2')
-
-        calibrated = self.module._apply_known_melody_calibration(digest=digest, melody=(60, 61, 62))
-
-        self.assertEqual(
-            calibrated,
-            (64, 64, 65, 67, 67, 65, 64, 62, 60, 60, 62, 64, 64, 62, 62),
-        )
+        self.assertGreaterEqual(len(profile.melody_pitches), 15)
+        self.assertTrue(self.module._is_reference_instrument_candidate(melody=profile.melody_pitches))
+        self.assertTrue(all(36 <= pitch <= 96 for pitch in profile.melody_pitches))
 
     def test_apply_known_melody_calibration_adjusts_unknown_sequence_to_reference_profile(self):
-        melody = (52, 53, 55, 57, 60, 62)
-        digest = b'\x01' * 32
+        melody = (36, 44, 52, 60, 68, 76)
 
-        calibrated = self.module._apply_known_melody_calibration(digest=digest, melody=melody)
+        calibrated = self.module._apply_known_melody_calibration(melody=melody)
 
         self.assertNotEqual(calibrated, melody)
         self.assertEqual(len(calibrated), len(melody))
         self.assertTrue(all(36 <= pitch <= 96 for pitch in calibrated))
-        overlap_ratio = sum(1 for pitch in calibrated if (pitch % 12) in self.module._REFERENCE_INSTRUMENT_PITCH_CLASSES) / len(calibrated)
+        pitch_classes = self.module._derive_reference_pitch_classes(melody=melody)
+        overlap_ratio = sum(1 for pitch in calibrated if (pitch % 12) in pitch_classes) / len(calibrated)
         self.assertGreaterEqual(overlap_ratio, 0.65)
 
 
     def test_apply_known_melody_calibration_preserves_unknown_non_candidate_sequence(self):
         melody = (49, 51, 54, 56, 58, 61)
-        digest = b'\x02' * 32
 
-        calibrated = self.module._apply_known_melody_calibration(digest=digest, melody=melody)
+        calibrated = self.module._apply_known_melody_calibration(melody=melody)
 
         self.assertEqual(calibrated, melody)
 
     def test_is_reference_instrument_candidate_branches(self):
         self.assertFalse(self.module._is_reference_instrument_candidate(melody=(60, 62, 64)))
         self.assertTrue(self.module._is_reference_instrument_candidate(melody=(52, 53, 55, 57, 60, 62)))
-        self.assertFalse(self.module._is_reference_instrument_candidate(melody=(48, 49, 51, 54, 56, 58)))
+        self.assertFalse(self.module._is_reference_instrument_candidate(melody=(98, 101, 103, 106, 108, 110)))
+
+    def test_derive_reference_pitch_classes_branches(self):
+        self.assertEqual(
+            self.module._derive_reference_pitch_classes(melody=()),
+            self.module._DEFAULT_REFERENCE_PITCH_CLASSES,
+        )
+        self.assertEqual(
+            self.module._derive_reference_pitch_classes(melody=(60, 61, 62, 63)),
+            self.module._DEFAULT_REFERENCE_PITCH_CLASSES,
+        )
+        dominant = self.module._derive_reference_pitch_classes(melody=(60, 62, 64, 65, 67, 69, 71, 72))
+        self.assertEqual(dominant, frozenset({0, 2, 4, 5, 7, 9, 11}))
 
     def test_apply_reference_instrument_calibration_empty_sequence_is_passthrough(self):
         self.assertEqual(self.module._apply_reference_instrument_calibration(melody=()), ())
@@ -238,9 +234,10 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
 
     def test_snap_pitch_to_reference_pitch_class_with_and_without_candidates(self):
         self.assertEqual(self.module._snap_pitch_to_reference_pitch_class(pitch=61), 60)
-
-        with mock.patch.object(self.module, "_REFERENCE_INSTRUMENT_PITCH_CLASSES", frozenset()):
-            self.assertEqual(self.module._snap_pitch_to_reference_pitch_class(pitch=61), 61)
+        self.assertEqual(
+            self.module._snap_pitch_to_reference_pitch_class(pitch=61, reference_pitch_classes=frozenset()),
+            61,
+        )
 
     def test_estimate_tempo_bpm_tracks_activity_level(self):
         digest = b'\x01' * 32
@@ -282,13 +279,11 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
 
         short = self.module._derive_melody_pitches(
             audio_bytes=audio,
-            digest=digest,
             estimated_duration_seconds=16,
             estimated_tempo_bpm=60,
         )
         long = self.module._derive_melody_pitches(
             audio_bytes=audio,
-            digest=digest,
             estimated_duration_seconds=140,
             estimated_tempo_bpm=120,
         )
@@ -303,7 +298,6 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
 
         melody = self.module._derive_melody_pitches(
             audio_bytes=audio,
-            digest=digest,
             estimated_duration_seconds=6,
             estimated_tempo_bpm=120,
         )
@@ -312,11 +306,11 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
         self.assertGreaterEqual(len(set(melody)), 4)
 
     def test_estimate_key_handles_empty_histogram_fallback_branch(self):
-        self.assertEqual(self.module._estimate_key(melody_pitches=(), digest=b'\x00\x00\x07' + b'\x00' * 29), 'C#')
+        self.assertEqual(self.module._estimate_key(melody_pitches=(), audio_bytes=b'\x01' * 17), 'B')
 
     def test_estimate_key_prefers_best_major_scale_fit(self):
         melody = (60, 62, 64, 65, 67, 69, 71, 72)
-        estimated_key = self.module._estimate_key(melody_pitches=melody, digest=b'\x00' * 32)
+        estimated_key = self.module._estimate_key(melody_pitches=melody, audio_bytes=b'\x00' * 32)
         self.assertEqual(estimated_key, 'C')
 
     def test_analyze_audio_bytes_rejects_empty_payload(self):
