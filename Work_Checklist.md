@@ -101,3 +101,5 @@ Implementation checklist mirroring `Final_Spec.md`. Every item has a unique chec
 - [x] WC-TASK-015: Investigate broken artifact usability reports (PNG/PDF/MIDI and "neon"), map remediation to task dependencies, and publish `FIX_PLAN.md` with exhaustive testing/coverage strategy.
 - [x] WC-TASK-016: Execute FIX_PLAN Phase A by generating valid local binary artifacts (MIDI/PDF/PNG), adding binary-safe artifact serving + validation, and expanding exhaustive artifact branch tests.
 
+- [x] WC-TASK-017: Replace filename-only local transcription outputs with deterministic audio-content analysis so different MP3 payloads produce distinct transcription metadata and notation artifacts, with exhaustive unit coverage.
+
