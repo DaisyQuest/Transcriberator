@@ -370,6 +370,55 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
         self.assertGreater(inferred, 400)
         self.assertLess(inferred, 500)
 
+    def test_estimate_frequency_spectral_peak_branches(self):
+        self.assertIsNone(
+            self.module._estimate_frequency_spectral_peak(
+                analysis_window=[0] * 48,
+                sample_rate=8_000,
+            )
+        )
+
+        self.assertIsNone(
+            self.module._estimate_frequency_spectral_peak(
+                analysis_window=[0] * 128,
+                sample_rate=8_000,
+            )
+        )
+
+        low_rate_window = [int(100 * math.sin(2 * math.pi * 50 * (i / 100))) for i in range(128)]
+        self.assertIsNone(
+            self.module._estimate_frequency_spectral_peak(
+                analysis_window=low_rate_window,
+                sample_rate=100,
+            )
+        )
+
+        sine_like = [int(80 * math.sin(2 * math.pi * 440 * (i / 8_000))) for i in range(256)]
+        inferred = self.module._estimate_frequency_spectral_peak(
+            analysis_window=sine_like,
+            sample_rate=8_000,
+        )
+        self.assertIsNotNone(inferred)
+        assert inferred is not None
+        self.assertGreater(inferred, 420)
+        self.assertLess(inferred, 460)
+
+    def test_cluster_frequency_candidates_branches(self):
+        self.assertEqual(self.module._cluster_frequency_candidates(candidate_frequencies=[441.0]), [441.0])
+        self.assertEqual(
+            self.module._cluster_frequency_candidates(candidate_frequencies=[100.0, 170.0, 250.0]),
+            [],
+        )
+
+        clustered = self.module._cluster_frequency_candidates(candidate_frequencies=[218.0, 222.0, 439.0, 442.0])
+        self.assertEqual(clustered, [439.0, 442.0])
+
+    def test_calculate_window_rms_branches(self):
+        self.assertEqual(self.module._calculate_window_rms(analysis_window=[]), 0.0)
+        rms = self.module._calculate_window_rms(analysis_window=[-10, 10, -10, 10])
+        self.assertGreater(rms, 9.9)
+        self.assertLess(rms, 10.1)
+
     def test_infer_segment_pitch_midi_prefers_autocorrelation_when_zcr_diverges(self):
         sine_like = [int(80 * math.sin(2 * math.pi * 220 * (i / 8_000))) for i in range(320)]
         inferred_pitch = self.module._infer_segment_pitch_midi(
@@ -384,6 +433,13 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
     def test_infer_segment_pitch_midi_returns_none_without_candidates(self):
         inferred = self.module._infer_segment_pitch_midi(
             analysis_window=[0] * 96,
+            sample_rate=8_000,
+        )
+        self.assertIsNone(inferred)
+
+    def test_infer_segment_pitch_midi_returns_none_when_rms_is_low(self):
+        inferred = self.module._infer_segment_pitch_midi(
+            analysis_window=[2] * 128,
             sample_rate=8_000,
         )
         self.assertIsNone(inferred)
