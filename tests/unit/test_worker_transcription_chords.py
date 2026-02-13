@@ -60,6 +60,19 @@ class TestTranscriptionWorkerChordIsolation(unittest.TestCase):
         self.assertGreaterEqual(result.confidence, 0.7)
         self.assertLessEqual(result.confidence, 0.99)
 
+    def test_normalization_deduplicates_and_sorts_frames_before_scoring(self):
+        result = self.worker.process(
+            MODULE.TranscriptionTaskRequest(
+                source_uri="blob://dupes",
+                polyphonic=True,
+                analysis_frames=((67, 60, 60, 64), (64, 67, 60, 60), (72, 72)),
+            )
+        )
+
+        self.assertEqual(result.event_count, 7)
+        self.assertEqual(result.detected_chords, ("C:major",))
+        self.assertEqual(result.isolated_pitches, (60, 64, 67))
+
     def test_identifies_extended_chord_qualities(self):
         augmented = self.worker.process(
             MODULE.TranscriptionTaskRequest(
@@ -146,6 +159,23 @@ class TestTranscriptionWorkerChordIsolation(unittest.TestCase):
         self.assertEqual(result.detected_instrument, "flute")
         self.assertGreater(result.confidence, 0.75)
 
+    def test_harmonic_density_bonus_increases_polyphonic_confidence(self):
+        sparse = self.worker.process(
+            MODULE.TranscriptionTaskRequest(
+                source_uri="blob://sparse",
+                polyphonic=True,
+                analysis_frames=((60,), (62,), (64,), (65,)),
+            )
+        )
+        dense = self.worker.process(
+            MODULE.TranscriptionTaskRequest(
+                source_uri="blob://dense",
+                polyphonic=True,
+                analysis_frames=((60, 64, 67), (62, 65, 69), (64, 67, 71), (65, 69, 72)),
+            )
+        )
+        self.assertGreater(dense.confidence, sparse.confidence)
+
     def test_auto_preset_detects_flute_for_high_monophonic_range(self):
         result = self.worker.process(
             MODULE.TranscriptionTaskRequest(
@@ -181,6 +211,35 @@ class TestTranscriptionWorkerChordIsolation(unittest.TestCase):
 
         self.assertEqual(result.detected_instrument, "electric_guitar")
         self.assertEqual(result.applied_preset, "electric_guitar")
+
+    def test_detect_instrument_returns_unknown_when_frames_are_empty(self):
+        detected, preset = self.worker._detect_instrument(
+            analysis_frames=(),
+            preset_name="auto",
+            chord_count=0,
+            polyphonic=False,
+        )
+        self.assertEqual((detected, preset), ("unknown", "auto"))
+
+    def test_score_confidence_guard_for_zero_frames(self):
+        confidence = self.worker._score_confidence(
+            polyphonic=True,
+            frame_count=0,
+            chord_count=0,
+            isolated_pitch_count=0,
+            harmonic_density=0,
+        )
+        self.assertEqual(confidence, 0.0)
+
+    def test_estimate_harmonic_density_empty_and_non_empty_paths(self):
+        self.assertEqual(self.worker._estimate_harmonic_density(()), 0.0)
+        self.assertEqual(
+            self.worker._estimate_harmonic_density(((60,), (60, 64), (60, 64, 67))),
+            2.0,
+        )
+
+    def test_profile_pitch_span_returns_expected_interval(self):
+        self.assertEqual(self.worker._profile_pitch_span("flute"), 36)
 
     def test_instrument_candidate_scoring_polyphony_branches(self):
         profile = MODULE.TranscriptionWorker._INSTRUMENT_PRESETS["flute"]

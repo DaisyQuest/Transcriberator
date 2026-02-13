@@ -119,3 +119,4 @@ Implementation checklist mirroring `Final_Spec.md`. Every item has a unique chec
 - [x] WC-TASK-030: Add worker-transcription instrument presets (auto/acoustic/electric/piano/flute/violin) to improve acoustic instrument detection, emit preset/detected instrument metadata, and expand exhaustive branch-focused unit coverage.
 
 - [x] WC-TASK-031: Improve pitch recognition and tuning controls with noise-suppression/weighted detection options, add a pre-submit waveform exclusion stage, provide one-click dashboard+editor launchers, and expand exhaustive regression coverage.
+- [x] WC-TASK-032: Harden worker-transcription sound-processing robustness with normalized frame analysis, enhanced confidence density scoring, deterministic instrument tie-breaking, and exhaustive branch-focused unit regression coverage.
