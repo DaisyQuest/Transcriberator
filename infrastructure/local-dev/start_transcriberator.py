@@ -30,7 +30,7 @@ _CLASSIC_MELODY_CONTOUR_TEMPLATES: tuple[tuple[int, ...], ...] = (
     # Ode to Joy opening phrase (normalized to C major context)
     (64, 64, 65, 67, 67, 65, 64, 62, 60, 60, 62, 64, 64, 62, 62),
 )
-?q_DEFAULT_MIDI_TICKS_PER_QUARTER = 480
+_DEFAULT_MIDI_TICKS_PER_QUARTER = 480
 _DEFAULT_MUSICXML_DIVISIONS = 960
 
 

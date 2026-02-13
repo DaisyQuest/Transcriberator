@@ -127,3 +127,5 @@ Implementation checklist mirroring `Final_Spec.md`. Every item has a unique chec
 - [x] WC-TASK-035: Improve local duration inference by threading PCM note lengths through analysis profiles and using timing-aware MusicXML/MIDI generation to prevent playback-time inflation.
 - [x] WC-TASK-036: Fix MusicXML beat conversion and harden MP3 duration parsing for variable frame streams to prevent local transcriptions from inflating song length.
 - [x] WC-TASK-037: Extend MP3 duration parsing with Xing/Info/VBRI metadata lookup and explicit tests for metadata-based duration inference.
+- [x] WC-TASK-038: Resolve project-wide compile breakages, validate with full test suite execution, and document remediation artifacts.
+
