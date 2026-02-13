@@ -83,6 +83,37 @@ class DashboardTuningSettings:
 
 _DEFAULT_DASHBOARD_SETTINGS_PATH = "infrastructure/local-dev/dashboard_settings.json"
 _DEFAULT_TUNING_SETTINGS = DashboardTuningSettings()
+_INSTRUMENT_PROFILE_OPTIONS: tuple[str, ...] = (
+    "auto",
+    "piano",
+    "acoustic_guitar",
+    "electric_guitar",
+    "violin",
+    "flute",
+)
+
+
+def _normalize_instrument_profile(raw_profile: str | None) -> str:
+    normalized = (raw_profile or "auto").strip().lower()
+    if normalized not in _INSTRUMENT_PROFILE_OPTIONS:
+        return "auto"
+    return normalized
+
+
+def _apply_instrument_profile(*, melody: tuple[int, ...], instrument_profile: str) -> tuple[int, ...]:
+    normalized_profile = _normalize_instrument_profile(instrument_profile)
+    if not melody or normalized_profile == "auto":
+        return melody
+
+    profile_ranges: dict[str, tuple[int, int]] = {
+        "piano": (21, 108),
+        "acoustic_guitar": (40, 88),
+        "electric_guitar": (40, 92),
+        "violin": (55, 103),
+        "flute": (60, 96),
+    }
+    low, high = profile_ranges[normalized_profile]
+    return tuple(max(low, min(high, pitch)) for pitch in melody)
 
 
 def _normalize_tuning_settings(raw: dict[str, Any] | None) -> DashboardTuningSettings:
@@ -1569,14 +1600,32 @@ def _render_page(
     editor_base_url: str,
     tuning_settings: DashboardTuningSettings,
     settings_path: str,
+    selected_job_id: str = "",
+    selected_instrument_profile: str = "auto",
     message: str = "",
 ) -> str:
+    normalized_profile = _normalize_instrument_profile(selected_instrument_profile)
+    selected_job = next((job for job in jobs if job["jobId"] == selected_job_id), jobs[0] if jobs else None)
+
+    preview_markup = "<p class=\'hint\'>Upload audio and run a transcription to unlock the visual preview workspace.</p>"
+    if selected_job is not None:
+        preview_stage_rows = "".join(
+            f"<li><strong>{html.escape(stage['stage_name'])}</strong>: {html.escape(stage['status'])} — {html.escape(stage['detail'])}</li>"
+            for stage in selected_job["stages"]
+        )
+        preview_markup = (
+            f"<h3>{html.escape(selected_job['audioFile'])}</h3>"
+            f"<p><strong>Status:</strong> {html.escape(selected_job['finalStatus'])} | <strong>Mode:</strong> {html.escape(selected_job['mode'])} | "
+            f"<strong>Instrument profile:</strong> {html.escape(selected_job.get('instrumentProfile', 'auto'))}</p>"
+            f"<p><strong>Tempo:</strong> {html.escape(str(selected_job['estimatedTempoBpm']))} BPM | <strong>Key:</strong> {html.escape(selected_job['estimatedKey'])} major | "
+            f"<strong>Derived notes:</strong> {html.escape(str(selected_job['derivedNoteCount']))}</p>"
+            f"<p><a href='/outputs/transcription?job={html.escape(selected_job['jobId'])}' target='_blank' rel='noopener'>Open raw transcription artifact</a></p>"
+            f"<textarea aria-label='Selected transcription preview' rows='16' readonly>{html.escape(selected_job['transcriptionText'])}</textarea>"
+            f"<ol>{preview_stage_rows}</ol>"
+        )
+
     rows = []
     for job in jobs:
-        stage_rows = "".join(
-            f"<li><strong>{html.escape(stage['stage_name'])}</strong>: {html.escape(stage['status'])} — {html.escape(stage['detail'])}</li>"
-            for stage in job["stages"]
-        )
         artifact_rows = "".join(
             f"<li><strong>{html.escape(artifact['name'])}</strong>: "
             f"<code>{html.escape(artifact['path'])}</code> "
@@ -1591,24 +1640,21 @@ def _render_page(
             f"<h3>{html.escape(job['audioFile'])}</h3>"
             f"<p><strong>Job:</strong> {html.escape(job['jobId'])} | <strong>Mode:</strong> {html.escape(job['mode'])} | "
             f"<strong>Status:</strong> {html.escape(job['finalStatus'])}</p>"
-            f"<p><strong>Submitted:</strong> {html.escape(job['submittedAtUtc'])}</p>"
+            f"<p><strong>Instrument profile:</strong> {html.escape(job.get('instrumentProfile', 'auto'))}</p>"
             f"<p><strong>Estimated duration:</strong> {html.escape(str(job['estimatedDurationSeconds']))} sec | "
             f"<strong>Estimated tempo:</strong> {html.escape(str(job['estimatedTempoBpm']))} BPM | "
-            f"<strong>Estimated key:</strong> {html.escape(job['estimatedKey'])} major | "
-            f"<strong>Derived notes:</strong> {html.escape(str(job['derivedNoteCount']))}</p>"
+            f"<strong>Estimated key:</strong> {html.escape(job['estimatedKey'])} major</p>"
             f"<p><strong>Excluded ranges:</strong> {html.escape(excluded_ranges_text)}</p>"
-            f"<p><strong>Transcription output:</strong> <code>{html.escape(job['transcriptionPath'])}</code><br/>"
-            f"<a href='/outputs/transcription?job={html.escape(job['jobId'])}' target='_blank' rel='noopener'>View raw output</a></p>"
-            f"<p><strong>Editor:</strong> <a href='{html.escape(job['editorUrl'])}' target='_blank' rel='noopener'>Open editor for this job</a></p>"
+            f"<p><a href='/?job={html.escape(job['jobId'])}'>Preview this generation</a> • "
+            f"<a href='{html.escape(job['editorUrl'])}' target='_blank' rel='noopener'>Open editor</a></p>"
             f"<p><strong>Sheet music artifacts:</strong></p><ul>{artifact_rows or '<li>No artifacts recorded.</li>'}</ul>"
             "<form action='/edit-transcription' method='post'>"
             f"<input type='hidden' name='job_id' value='{html.escape(job['jobId'])}'/>"
             "<label><strong>Edit transcription:</strong><br/>"
-            f"<textarea name='transcription_text' rows='10' style='width:100%;font-family:monospace'>{html.escape(job['transcriptionText'])}</textarea>"
+            f"<textarea name='transcription_text' rows='10'>{html.escape(job['transcriptionText'])}</textarea>"
             "</label><br/>"
             "<button type='submit'>Save transcription edits</button>"
             "</form>"
-            f"<ol>{stage_rows}</ol>"
             "</article>"
         )
 
@@ -1622,53 +1668,67 @@ def _render_page(
   <meta charset='utf-8'>
   <title>Transcriberator Local Dashboard</title>
   <style>
-    body {{ font-family: Arial, sans-serif; margin: 2rem auto; max-width: 960px; line-height: 1.4; }}
+    body {{ font-family: Inter, Arial, sans-serif; margin: 1.5rem auto; max-width: 1080px; line-height: 1.5; background: #f8fbff; color: #0f172a; }}
     h1 {{ margin-bottom: 0.25rem; }}
-    .hint {{ color: #555; margin-top: 0; }}
-    form {{ border: 1px solid #ddd; padding: 1rem; border-radius: 8px; background: #fafafa; }}
+    h2 {{ margin-top: 0; }}
+    .hint {{ color: #475569; margin-top: 0; }}
+    .panel {{ border: 1px solid #dbeafe; padding: 1rem; border-radius: 12px; background: #ffffff; margin-bottom: 1rem; box-shadow: 0 1px 2px rgba(2, 6, 23, 0.06); }}
     .notice {{ background: #ecfeff; border: 1px solid #0891b2; padding: 0.75rem; border-radius: 8px; margin-bottom: 1rem; }}
-    .job-card {{ border: 1px solid #e5e7eb; border-radius: 8px; padding: 1rem; margin-top: 1rem; }}
-    textarea {{ margin-top: 0.5rem; }}
-    button {{ padding: 0.5rem 1rem; }}
+    .job-card {{ border: 1px solid #e2e8f0; border-radius: 8px; padding: 1rem; margin-top: 1rem; background: #fff; }}
+    textarea {{ margin-top: 0.5rem; width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }}
+    button {{ padding: 0.5rem 1rem; border-radius: 8px; border: 1px solid #1d4ed8; background: #2563eb; color: #fff; cursor: pointer; }}
+    button:hover {{ background: #1d4ed8; }}
+    .settings-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(310px, 1fr)); gap: 0.75rem 1rem; align-items: center; }}
+    .control-row {{ display: grid; grid-template-columns: 1fr 110px 1fr 52px; gap: 0.5rem; align-items: center; }}
+    .control-row label {{ font-weight: 600; }}
+    .control-row output {{ font-variant-numeric: tabular-nums; color: #1d4ed8; font-weight: 600; }}
+    .preview-layout {{ display: grid; grid-template-columns: 1fr; gap: 0.75rem; }}
+    .instrument-options {{ display: flex; flex-wrap: wrap; gap: 0.75rem; padding: 0.4rem 0; }}
+    .instrument-options label {{ display: inline-flex; align-items: center; gap: 0.35rem; }}
   </style>
 </head>
 <body>
-  <h1>Transcriberator Dashboard</h1>
-  <p class='hint'>Owner: <strong>{html.escape(owner_id)}</strong>. Upload MP3/WAV/FLAC to run a full local transcription pipeline.</p>
+  <h1>Transcriberator Dashboard Previewer</h1>
+  <p class='hint'>Owner: <strong>{html.escape(owner_id)}</strong>. Select files, preview generated transcriptions, and retune settings with immediate visual controls.</p>
   <p class='hint'>Editor app: <a href='{html.escape(editor_base_url)}' target='_blank' rel='noopener'>{html.escape(editor_base_url)}</a></p>
   {f"<div class='notice'>{html.escape(message)}</div>" if message else ''}
-  <form action='/settings' method='post'>
-    <h2>Settings</h2>
-    <p class='hint'>Loaded defaults from <code>{html.escape(settings_path)}</code>. Adjust tuning controls to steer pitch/chord inference behavior.</p>
-    <label for='rms_gate'>RMS gate:</label>
-    <input id='rms_gate' name='rms_gate' type='number' step='0.1' min='0.1' max='100' value='{tuning_settings.rms_gate}'/><br/><br/>
-    <label for='min_frequency_hz'>Min frequency (Hz):</label>
-    <input id='min_frequency_hz' name='min_frequency_hz' type='number' min='20' max='5000' value='{tuning_settings.min_frequency_hz}'/><br/><br/>
-    <label for='max_frequency_hz'>Max frequency (Hz):</label>
-    <input id='max_frequency_hz' name='max_frequency_hz' type='number' min='20' max='5000' value='{tuning_settings.max_frequency_hz}'/><br/><br/>
-    <label for='cluster_tolerance_hz'>Cluster tolerance (Hz):</label>
-    <input id='cluster_tolerance_hz' name='cluster_tolerance_hz' type='number' step='0.1' min='1' max='200' value='{tuning_settings.frequency_cluster_tolerance_hz}'/><br/><br/>
-    <label for='pitch_floor_midi'>Pitch floor (MIDI):</label>
-    <input id='pitch_floor_midi' name='pitch_floor_midi' type='number' min='0' max='127' value='{tuning_settings.pitch_floor_midi}'/><br/><br/>
-    <label for='pitch_ceiling_midi'>Pitch ceiling (MIDI):</label>
-    <input id='pitch_ceiling_midi' name='pitch_ceiling_midi' type='number' min='0' max='127' value='{tuning_settings.pitch_ceiling_midi}'/><br/><br/>
-    <label for='noise_suppression_level'>Noise suppression level:</label>
-    <input id='noise_suppression_level' name='noise_suppression_level' type='number' step='0.01' min='0' max='1' value='{tuning_settings.noise_suppression_level}'/><br/><br/>
-    <label for='autocorrelation_weight'>Autocorrelation weight:</label>
-    <input id='autocorrelation_weight' name='autocorrelation_weight' type='number' step='0.01' min='0' max='1' value='{tuning_settings.autocorrelation_weight}'/><br/><br/>
-    <label for='spectral_weight'>Spectral weight:</label>
-    <input id='spectral_weight' name='spectral_weight' type='number' step='0.01' min='0' max='1' value='{tuning_settings.spectral_weight}'/><br/><br/>
-    <label for='zero_crossing_weight'>Zero-crossing weight:</label>
-    <input id='zero_crossing_weight' name='zero_crossing_weight' type='number' step='0.01' min='0' max='1' value='{tuning_settings.zero_crossing_weight}'/><br/><br/>
-    <label for='transient_sensitivity'>Transient sensitivity:</label>
-    <input id='transient_sensitivity' name='transient_sensitivity' type='number' step='0.01' min='0' max='1' value='{tuning_settings.transient_sensitivity}'/><br/><br/>
+
+  <section class='panel preview-layout'>
+    <h2>Generation Preview Workspace</h2>
+    <p class='hint'>Use the job selector links below to compare generations and iterate on tuning + instrument profile settings.</p>
+    {preview_markup}
+  </section>
+
+  <form action='/settings' method='post' class='panel'>
+    <h2>Transcription Tuning</h2>
+    <p class='hint'>Loaded defaults from <code>{html.escape(settings_path)}</code>. Numeric inputs are mirrored by sliders for fast experimentation.</p>
+    <div class='settings-grid'>
+      <div class='control-row'><label for='rms_gate'>RMS gate</label><input id='rms_gate' name='rms_gate' type='number' step='0.1' min='0.1' max='100' value='{tuning_settings.rms_gate}'/><input id='rms_gate_slider' type='range' min='0.1' max='100' step='0.1' value='{tuning_settings.rms_gate}' data-sync='rms_gate'/><output id='rms_gate_output'>{tuning_settings.rms_gate}</output></div>
+      <div class='control-row'><label for='min_frequency_hz'>Min frequency (Hz)</label><input id='min_frequency_hz' name='min_frequency_hz' type='number' min='20' max='5000' value='{tuning_settings.min_frequency_hz}'/><input id='min_frequency_hz_slider' type='range' min='20' max='5000' step='1' value='{tuning_settings.min_frequency_hz}' data-sync='min_frequency_hz'/><output id='min_frequency_hz_output'>{tuning_settings.min_frequency_hz}</output></div>
+      <div class='control-row'><label for='max_frequency_hz'>Max frequency (Hz)</label><input id='max_frequency_hz' name='max_frequency_hz' type='number' min='20' max='5000' value='{tuning_settings.max_frequency_hz}'/><input id='max_frequency_hz_slider' type='range' min='20' max='5000' step='1' value='{tuning_settings.max_frequency_hz}' data-sync='max_frequency_hz'/><output id='max_frequency_hz_output'>{tuning_settings.max_frequency_hz}</output></div>
+      <div class='control-row'><label for='cluster_tolerance_hz'>Cluster tolerance (Hz)</label><input id='cluster_tolerance_hz' name='cluster_tolerance_hz' type='number' step='0.1' min='1' max='200' value='{tuning_settings.frequency_cluster_tolerance_hz}'/><input id='cluster_tolerance_hz_slider' type='range' min='1' max='200' step='0.1' value='{tuning_settings.frequency_cluster_tolerance_hz}' data-sync='cluster_tolerance_hz'/><output id='cluster_tolerance_hz_output'>{tuning_settings.frequency_cluster_tolerance_hz}</output></div>
+      <div class='control-row'><label for='pitch_floor_midi'>Pitch floor (MIDI)</label><input id='pitch_floor_midi' name='pitch_floor_midi' type='number' min='0' max='127' value='{tuning_settings.pitch_floor_midi}'/><input id='pitch_floor_midi_slider' type='range' min='0' max='127' step='1' value='{tuning_settings.pitch_floor_midi}' data-sync='pitch_floor_midi'/><output id='pitch_floor_midi_output'>{tuning_settings.pitch_floor_midi}</output></div>
+      <div class='control-row'><label for='pitch_ceiling_midi'>Pitch ceiling (MIDI)</label><input id='pitch_ceiling_midi' name='pitch_ceiling_midi' type='number' min='0' max='127' value='{tuning_settings.pitch_ceiling_midi}'/><input id='pitch_ceiling_midi_slider' type='range' min='0' max='127' step='1' value='{tuning_settings.pitch_ceiling_midi}' data-sync='pitch_ceiling_midi'/><output id='pitch_ceiling_midi_output'>{tuning_settings.pitch_ceiling_midi}</output></div>
+      <div class='control-row'><label for='noise_suppression_level'>Noise suppression</label><input id='noise_suppression_level' name='noise_suppression_level' type='number' step='0.01' min='0' max='1' value='{tuning_settings.noise_suppression_level}'/><input id='noise_suppression_level_slider' type='range' min='0' max='1' step='0.01' value='{tuning_settings.noise_suppression_level}' data-sync='noise_suppression_level'/><output id='noise_suppression_level_output'>{tuning_settings.noise_suppression_level}</output></div>
+      <div class='control-row'><label for='autocorrelation_weight'>Autocorrelation weight</label><input id='autocorrelation_weight' name='autocorrelation_weight' type='number' step='0.01' min='0' max='1' value='{tuning_settings.autocorrelation_weight}'/><input id='autocorrelation_weight_slider' type='range' min='0' max='1' step='0.01' value='{tuning_settings.autocorrelation_weight}' data-sync='autocorrelation_weight'/><output id='autocorrelation_weight_output'>{tuning_settings.autocorrelation_weight}</output></div>
+      <div class='control-row'><label for='spectral_weight'>Spectral weight</label><input id='spectral_weight' name='spectral_weight' type='number' step='0.01' min='0' max='1' value='{tuning_settings.spectral_weight}'/><input id='spectral_weight_slider' type='range' min='0' max='1' step='0.01' value='{tuning_settings.spectral_weight}' data-sync='spectral_weight'/><output id='spectral_weight_output'>{tuning_settings.spectral_weight}</output></div>
+      <div class='control-row'><label for='zero_crossing_weight'>Zero-crossing weight</label><input id='zero_crossing_weight' name='zero_crossing_weight' type='number' step='0.01' min='0' max='1' value='{tuning_settings.zero_crossing_weight}'/><input id='zero_crossing_weight_slider' type='range' min='0' max='1' step='0.01' value='{tuning_settings.zero_crossing_weight}' data-sync='zero_crossing_weight'/><output id='zero_crossing_weight_output'>{tuning_settings.zero_crossing_weight}</output></div>
+      <div class='control-row'><label for='transient_sensitivity'>Transient sensitivity</label><input id='transient_sensitivity' name='transient_sensitivity' type='number' step='0.01' min='0' max='1' value='{tuning_settings.transient_sensitivity}'/><input id='transient_sensitivity_slider' type='range' min='0' max='1' step='0.01' value='{tuning_settings.transient_sensitivity}' data-sync='transient_sensitivity'/><output id='transient_sensitivity_output'>{tuning_settings.transient_sensitivity}</output></div>
+    </div>
+    <br/>
     <button type='submit'>Save settings</button>
   </form>
 
-  <form action='/transcribe' method='post' enctype='multipart/form-data'>
+  <form action='/transcribe' method='post' enctype='multipart/form-data' class='panel'>
+    <h2>Create new preview generation</h2>
     <label for='audio'>Audio file:</label><br/>
     <input id='audio' type='file' name='audio' accept='.mp3,.wav,.flac,audio/*' required/><br/><br/>
-    <h2>Pre-submit cleanup stage</h2>
+    <h3>Instrument profile</h3>
+    <p class='hint'>Choose a profile to steer melody range behavior for this run.</p>
+    <div class='instrument-options'>
+      {''.join(f"<label><input type='radio' name='instrument_profile' value='{profile}' {'checked' if normalized_profile == profile else ''}/> {profile.replace('_', ' ').title()}</label>" for profile in _INSTRUMENT_PROFILE_OPTIONS)}
+    </div>
+    <h3>Pre-submit cleanup stage</h3>
     <p class='hint'>Load audio, preview waveform, and mark time ranges to exclude before transcription.</p>
     <canvas id='waveform_preview' width='900' height='120' style='width:100%;border:1px solid #ddd;margin-bottom:0.75rem;'></canvas><br/>
     <label for='exclude_ranges'>Exclude ranges (seconds, e.g. 0-2.5, 7-9):</label><br/>
@@ -1684,6 +1744,29 @@ def _render_page(
 
   <h2>Recent jobs</h2>
   {jobs_markup}
+
+  <script>
+    (() => {{
+      const sliders = document.querySelectorAll('input[type="range"][data-sync]');
+      for (const slider of sliders) {{
+        const numericId = slider.getAttribute('data-sync');
+        const numeric = document.getElementById(numericId);
+        const output = document.getElementById(`${{numericId}}_output`);
+        if (!numeric || !output) continue;
+
+        const syncFromSlider = () => {{
+          numeric.value = slider.value;
+          output.textContent = slider.value;
+        }};
+        const syncFromNumeric = () => {{
+          slider.value = numeric.value;
+          output.textContent = numeric.value;
+        }};
+        slider.addEventListener('input', syncFromSlider);
+        numeric.addEventListener('input', syncFromNumeric);
+      }}
+    }})();
+  </script>
 </body>
 </html>
 """
@@ -1711,6 +1794,7 @@ def serve_dashboard(*, config: DashboardServerConfig) -> None:
         "uploads_dir": Path(tempfile.mkdtemp(prefix="transcriberator_uploads_")),
         "messages": {},
         "tuning_settings": tuning_defaults,
+        "instrument_profile": "auto",
     }
     api_service = dashboard_api.DashboardApiSkeleton()
     session = api_service.issue_access_token(owner_id=config.owner_id)
@@ -1732,6 +1816,7 @@ def serve_dashboard(*, config: DashboardServerConfig) -> None:
 
             query = parse_qs(parsed.query)
             message_id = query.get("msg", [""])[0]
+            selected_job_id = query.get("job", [""])[0]
             message = state["messages"].pop(message_id, "")
             html_content = _render_page(
                 owner_id=state["owner_id"],
@@ -1740,6 +1825,8 @@ def serve_dashboard(*, config: DashboardServerConfig) -> None:
                 editor_base_url=config.editor_base_url,
                 tuning_settings=state["tuning_settings"],
                 settings_path=config.settings_path,
+                selected_job_id=selected_job_id,
+                selected_instrument_profile=state["instrument_profile"],
                 message=message,
             )
             payload = html_content.encode("utf-8")
@@ -1904,6 +1991,7 @@ def serve_dashboard(*, config: DashboardServerConfig) -> None:
             filename = ""
             file_bytes = b""
             exclude_ranges_raw = ""
+            instrument_profile = state["instrument_profile"]
 
             for part in parts:
                 header_blob, _, value = part.partition(b"\r\n\r\n")
@@ -1922,6 +2010,8 @@ def serve_dashboard(*, config: DashboardServerConfig) -> None:
                     file_bytes = value
                 if 'name="exclude_ranges"' in headers:
                     exclude_ranges_raw = value.decode("utf-8", errors="ignore").strip()
+                if 'name="instrument_profile"' in headers:
+                    instrument_profile = _normalize_instrument_profile(value.decode("utf-8", errors="ignore"))
 
             normalized_mode = _validate_mode(mode)
             safe_filename = _validate_audio_filename(filename)
@@ -1974,6 +2064,18 @@ def serve_dashboard(*, config: DashboardServerConfig) -> None:
                 audio_bytes=processed_audio_bytes,
                 tuning_settings=state["tuning_settings"],
             )
+            profile = AudioAnalysisProfile(
+                fingerprint=profile.fingerprint,
+                byte_count=profile.byte_count,
+                estimated_duration_seconds=profile.estimated_duration_seconds,
+                estimated_tempo_bpm=profile.estimated_tempo_bpm,
+                estimated_key=profile.estimated_key,
+                melody_pitches=_apply_instrument_profile(
+                    melody=profile.melody_pitches,
+                    instrument_profile=instrument_profile,
+                ),
+                reasoning_trace=profile.reasoning_trace + (f"Instrument profile: {_normalize_instrument_profile(instrument_profile)}.",),
+            )
             transcription_text = _build_transcription_text_with_analysis(
                 audio_file=safe_filename,
                 mode=normalized_mode,
@@ -2000,11 +2102,13 @@ def serve_dashboard(*, config: DashboardServerConfig) -> None:
             summary["estimatedTempoBpm"] = profile.estimated_tempo_bpm
             summary["estimatedKey"] = profile.estimated_key
             summary["derivedNoteCount"] = len(profile.melody_pitches)
+            summary["instrumentProfile"] = _normalize_instrument_profile(instrument_profile)
             summary["excludedRanges"] = [
                 {"start": item.start_second, "end": item.end_second}
                 for item in exclusion_ranges
             ]
             summary["editorUrl"] = f"{config.editor_base_url.rstrip('/')}/?job={job.id}"
+            state["instrument_profile"] = summary["instrumentProfile"]
             state["jobs"].append(summary)
             excluded_label = (
                 ", ".join(f"{item.start_second:.2f}-{item.end_second:.2f}s" for item in exclusion_ranges)

@@ -31,7 +31,8 @@ def load_entrypoint_module():
     return module
 
 
-def build_multipart_body(filename: str, file_bytes: bytes, mode: str):
+def build_multipart_body(filename: str, file_bytes: bytes, mode: str, instrument_profile: str = 'auto'):
+
     boundary = '----WebKitFormBoundary7MA4YWxkTrZu0gW'
     lines = [
         f'--{boundary}',
@@ -43,6 +44,10 @@ def build_multipart_body(filename: str, file_bytes: bytes, mode: str):
         'Content-Disposition: form-data; name="mode"',
         '',
         mode,
+        f'--{boundary}',
+        'Content-Disposition: form-data; name="instrument_profile"',
+        '',
+        instrument_profile,
         f'--{boundary}--',
         '',
     ]
@@ -290,6 +295,16 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
         calibrated = self.module._apply_known_melody_calibration(melody=melody)
 
         self.assertEqual(calibrated, melody)
+
+    def test_normalize_instrument_profile_handles_invalid_values(self):
+        self.assertEqual(self.module._normalize_instrument_profile('PIANO'), 'piano')
+        self.assertEqual(self.module._normalize_instrument_profile('banjo'), 'auto')
+        self.assertEqual(self.module._normalize_instrument_profile(None), 'auto')
+
+    def test_apply_instrument_profile_clamps_to_profile_ranges(self):
+        melody = (10, 50, 120)
+        self.assertEqual(self.module._apply_instrument_profile(melody=melody, instrument_profile='flute'), (60, 60, 96))
+        self.assertEqual(self.module._apply_instrument_profile(melody=melody, instrument_profile='auto'), melody)
 
     def test_is_reference_instrument_candidate_branches(self):
         self.assertFalse(self.module._is_reference_instrument_candidate(melody=(60, 62, 64)))
@@ -905,6 +920,64 @@ class TestDashboardServer(unittest.TestCase):
 
             thread.join(timeout=3)
 
+    def test_dashboard_transcribe_records_selected_instrument_profile(self):
+        holder = {}
+        original_server = self.module.ThreadingHTTPServer
+
+        class TestServer(original_server):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                holder['server'] = self
+
+            def serve_forever(self, poll_interval=0.5):
+                for _ in range(3):
+                    self.handle_request()
+
+        with mock.patch.object(self.module, 'ThreadingHTTPServer', TestServer):
+            thread = threading.Thread(
+                target=self.module.serve_dashboard,
+                kwargs={
+                    'config': self.module.DashboardServerConfig(
+                        host='127.0.0.1',
+                        port=0,
+                        owner_id='owner-a',
+                        mode='draft',
+                        allow_hq_degradation=True,
+                    )
+                },
+                daemon=True,
+            )
+            thread.start()
+
+            for _ in range(20):
+                if 'server' in holder:
+                    break
+                time.sleep(0.05)
+            self.assertIn('server', holder)
+
+            host, port = holder['server'].server_address
+
+            class NoRedirect(request.HTTPRedirectHandler):
+                def redirect_request(self, req, fp, code, msg, headers, newurl):
+                    return None
+
+            payload, boundary = build_multipart_body('demo.wav', b'RIFF', 'draft', instrument_profile='flute')
+            post_request = request.Request(
+                f'http://{host}:{port}/transcribe',
+                data=payload,
+                method='POST',
+                headers={'Content-Type': f'multipart/form-data; boundary={boundary}'},
+            )
+            opener = request.build_opener(NoRedirect)
+            with self.assertRaises(HTTPError):
+                opener.open(post_request, timeout=2)
+
+            get_body = request.urlopen(f'http://{host}:{port}/', timeout=2).read().decode('utf-8')
+            self.assertIn('Instrument profile:</strong> flute', get_body)
+            self.assertIn("value='flute' checked", get_body)
+
+            thread.join(timeout=3)
+
     def test_dashboard_can_view_and_edit_transcription_output(self):
         holder = {}
         original_server = self.module.ThreadingHTTPServer
@@ -1476,6 +1549,8 @@ class TestDashboardServer(unittest.TestCase):
             tuning_settings=self.module.DashboardTuningSettings(),
             settings_path='infrastructure/local-dev/dashboard_settings.json',
             message='done',
+            selected_job_id='job_1',
+            selected_instrument_profile='violin',
             jobs=[
                 {
                     'audioFile': 'clip.wav',
@@ -1501,16 +1576,19 @@ class TestDashboardServer(unittest.TestCase):
                 }
             ],
         )
-        self.assertIn('Transcriberator Dashboard', html_text)
+        self.assertIn('Transcriberator Dashboard Previewer', html_text)
         self.assertIn('clip.wav', html_text)
         self.assertIn('done', html_text)
         self.assertIn('/outputs/transcription?job=job_1', html_text)
         self.assertIn('/outputs/artifact?job=job_1&amp;name=musicxml', html_text)
         self.assertIn('hello world', html_text)
         self.assertIn('Editor app:', html_text)
-        self.assertIn('Settings', html_text)
+        self.assertIn('Transcription Tuning', html_text)
         self.assertIn('rms_gate', html_text)
-        self.assertIn('Open editor for this job', html_text)
+        self.assertIn('Preview this generation', html_text)
+        self.assertIn("name='instrument_profile'", html_text)
+        self.assertIn("type='range'", html_text)
+        self.assertIn('Generation Preview Workspace', html_text)
 
 
 class TestStartupEntrypointCli(unittest.TestCase):
