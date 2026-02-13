@@ -230,7 +230,7 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
 
         self.assertEqual(
             profile.melody_pitches,
-            (64, 64, 65, 67, 67, 65, 64, 62, 60, 60, 62, 64, 64, 62, 62),
+            (60, 63, 66, 63, 60, 54, 60, 60, 63, 62, 61, 61, 66, 63, 60, 60, 63, 62, 66, 66, 60, 65, 65, 60, 64, 64, 62, 62, 66, 69, 62, 62),
         )
         self.assertTrue(all(36 <= pitch <= 96 for pitch in profile.melody_pitches))
 
@@ -598,6 +598,51 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
 
         self.assertEqual(estimated, 1)
 
+    def test_estimate_audio_duration_seconds_uses_mp3_frame_headers(self):
+        frame = bytes([0xFF, 0xE2, 0x10, 0x00]) + bytes(204)
+        payload = frame * 100
+
+        estimated = self.module._estimate_audio_duration_seconds(audio_file='demo.mp3', audio_bytes=payload)
+
+        self.assertEqual(estimated, 5)
+
+    def test_estimate_audio_duration_seconds_prefers_xing_header(self):
+        # MPEG-1 Layer III mono, 44.1kHz, 128 kbps.
+        # This yields a 21-byte side-info+CRC offset before Xing payload.
+        header = bytes([0xFF, 0xFB, 0x90, 0xC4])
+        frame_length = 417
+        xing_offset = 21
+        total_frames = 200
+
+        first_frame = bytearray(frame_length)
+        first_frame[:4] = header
+        first_frame[xing_offset:xing_offset + 4] = b"Xing"
+        first_frame[xing_offset + 4:xing_offset + 8] = (1).to_bytes(4, byteorder="big")  # has total frame count
+        first_frame[xing_offset + 8:xing_offset + 12] = total_frames.to_bytes(4, byteorder="big")
+
+        payload = bytes(first_frame) + bytes([0x00] * frame_length)
+        estimated = self.module._estimate_audio_duration_seconds(audio_file='xing.mp3', audio_bytes=payload)
+
+        expected_seconds = max(1, int(round((total_frames * 1152) / 44100)))
+        self.assertEqual(estimated, expected_seconds)
+
+    def test_estimate_audio_duration_seconds_parses_vbri_header(self):
+        # VBRI headers commonly start at fixed offsets from the frame start.
+        header = bytes([0xFF, 0xFB, 0x90, 0x00])
+        frame_length = 417
+        total_frames = 120
+        vbri_offset = 0x24
+
+        first_frame = bytearray(frame_length)
+        first_frame[:4] = header
+        first_frame[vbri_offset:vbri_offset + 4] = b"VBRI"
+        first_frame[vbri_offset + 10:vbri_offset + 14] = total_frames.to_bytes(4, byteorder="big")
+
+        estimated = self.module._estimate_audio_duration_seconds(audio_file='vbri.mp3', audio_bytes=bytes(first_frame))
+
+        expected_seconds = max(1, int(round((total_frames * 1152) / 44100)))
+        self.assertEqual(estimated, expected_seconds)
+
     def test_derive_melody_pitches_scales_with_duration(self):
         audio = bytes((index * 13) % 256 for index in range(200_000))
         digest = b'\x0f' * 32
@@ -713,6 +758,31 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
         self.assertIn('Reasoning trace', text)
         self.assertIn('Tuning: RMS gate=5.0', text)
 
+    def test_normalize_note_durations_seconds_scales_to_target_duration(self):
+        self.assertEqual(
+            self.module._normalize_note_durations_seconds(
+                melody=(60, 61, 62),
+                estimated_duration_seconds=10,
+                detected_note_durations_seconds=(1.0, 2.0),
+            ),
+            (2.0, 4.0, 4.0),
+        )
+
+    def test_normalize_note_durations_seconds_uses_fallback_when_no_input(self):
+        self.assertEqual(
+            self.module._normalize_note_durations_seconds(
+                melody=(60, 61),
+                estimated_duration_seconds=10,
+                detected_note_durations_seconds=(),
+            ),
+            (5.0, 5.0),
+        )
+
+    def test_midi_pitch_to_step_returns_sharp_notation(self):
+        self.assertEqual(self.module._midi_pitch_to_step(60), "C")
+        self.assertEqual(self.module._midi_pitch_to_step(61), "C#")
+        self.assertEqual(self.module._midi_pitch_to_step(63), "D#")
+
     def test_build_sheet_artifacts_creates_expected_outputs(self):
         with tempfile.TemporaryDirectory() as tmp:
             profile = self.module.AudioAnalysisProfile(
@@ -738,8 +808,12 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
                     self.assertEqual(artifact['downloadPath'], f"/outputs/artifact?job=job_123&name={artifact['name']}")
 
             musicxml_payload = Path(next(a['path'] for a in artifacts if a['name'] == 'musicxml')).read_text(encoding='utf-8')
-            self.assertIn('<step>C</step><octave>4</octave>', musicxml_payload)
-            self.assertIn('<step>D</step><octave>4</octave>', musicxml_payload)
+            self.assertIn('<step>C#</step><octave>4</octave>', musicxml_payload)
+            self.assertIn('<step>D#</step><octave>4</octave>', musicxml_payload)
+            self.assertIn('<step>F#</step><octave>4</octave>', musicxml_payload)
+            self.assertIn('<step>G#</step><octave>4</octave>', musicxml_payload)
+            self.assertIn('<sound tempo=\"108\"/>', musicxml_payload)
+            self.assertIn('<duration>', musicxml_payload)
 
 
 
@@ -751,6 +825,7 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
         self.assertIsNone(self.module._validate_midi_payload(midi))
         self.assertIsNone(self.module._validate_pdf_payload(pdf))
         self.assertIsNone(self.module._validate_png_payload(png))
+        self.assertIn(b'\xff\x51\x03\x07\xa1\x20', midi)
         self.assertIsNone(self.module._validate_artifact_payload(artifact_name='musicxml', payload=b'<xml/>'))
 
     def test_midi_payload_builder_is_melody_specific(self):

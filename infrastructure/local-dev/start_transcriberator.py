@@ -30,6 +30,8 @@ _CLASSIC_MELODY_CONTOUR_TEMPLATES: tuple[tuple[int, ...], ...] = (
     # Ode to Joy opening phrase (normalized to C major context)
     (64, 64, 65, 67, 67, 65, 64, 62, 60, 60, 62, 64, 64, 62, 62),
 )
+?q_DEFAULT_MIDI_TICKS_PER_QUARTER = 480
+_DEFAULT_MUSICXML_DIVISIONS = 960
 
 
 class StartupError(RuntimeError):
@@ -63,6 +65,7 @@ class AudioAnalysisProfile:
     estimated_tempo_bpm: int
     estimated_key: str
     melody_pitches: tuple[int, ...]
+    note_durations_seconds: tuple[float, ...] = ()
     reasoning_trace: tuple[str, ...] = ()
 
 
@@ -435,11 +438,18 @@ def _analyze_audio_bytes(
     fingerprint = digest.hex()[:16]
     estimated_duration_seconds = _estimate_audio_duration_seconds(audio_file=audio_file, audio_bytes=audio_bytes)
     estimated_tempo_bpm = _estimate_tempo_bpm(audio_bytes=audio_bytes, digest=digest)
+    inferred_note_durations_seconds: list[float] = []
     melody = _derive_melody_pitches(
         audio_bytes=audio_bytes,
         estimated_duration_seconds=estimated_duration_seconds,
         estimated_tempo_bpm=estimated_tempo_bpm,
         tuning_settings=active_tuning,
+        note_durations_seconds=inferred_note_durations_seconds,
+    )
+    note_durations_seconds = _normalize_note_durations_seconds(
+        melody=melody,
+        estimated_duration_seconds=estimated_duration_seconds,
+        detected_note_durations_seconds=tuple(inferred_note_durations_seconds),
     )
     refined_melody = _refine_melody_with_contour_templates(melody=melody)
     if refined_melody != melody:
@@ -447,6 +457,11 @@ def _analyze_audio_bytes(
     else:
         melody = _apply_known_melody_calibration(melody=melody)
         melody = _refine_melody_with_contour_templates(melody=melody)
+    note_durations_seconds = _normalize_note_durations_seconds(
+        melody=melody,
+        estimated_duration_seconds=estimated_duration_seconds,
+        detected_note_durations_seconds=note_durations_seconds,
+    )
     estimated_key = _estimate_key(melody_pitches=melody, audio_bytes=audio_bytes)
     reasoning_trace = _build_reasoning_trace(
         melody=tuple(melody),
@@ -462,6 +477,7 @@ def _analyze_audio_bytes(
         estimated_tempo_bpm=estimated_tempo_bpm,
         estimated_key=estimated_key,
         melody_pitches=tuple(melody),
+        note_durations_seconds=note_durations_seconds,
         reasoning_trace=reasoning_trace,
     )
 
@@ -519,6 +535,42 @@ def _build_reasoning_trace(
         f"Contour evidence: avg step={average_step:.2f} semitones, tonal overlap={tonal_overlap:.2f}, dominant pitch classes={dominant_text or 'none'}.",
         f"Musical estimate: key={estimated_key} major, tempo={estimated_tempo_bpm} BPM, confidence hint={confidence_hint:.2f}.",
     )
+
+
+def _normalize_note_durations_seconds(
+    *,
+    melody: tuple[int, ...],
+    estimated_duration_seconds: int,
+    detected_note_durations_seconds: tuple[float, ...] = (),
+) -> tuple[float, ...]:
+    if not melody:
+        return ()
+
+    minimum_duration_seconds = 0.05
+    melody_length = len(melody)
+    fallback_duration = max(
+        minimum_duration_seconds,
+        estimated_duration_seconds / max(1, melody_length),
+    )
+
+    if not detected_note_durations_seconds:
+        return tuple(fallback_duration for _ in melody)
+
+    durations = list(detected_note_durations_seconds[:melody_length])
+    if len(durations) < melody_length:
+        durations.extend([durations[-1] if durations else fallback_duration] * (melody_length - len(durations)))
+
+    total_duration = sum(durations)
+    if total_duration <= 0:
+        return tuple(fallback_duration for _ in melody)
+
+    normalized_duration_scale = estimated_duration_seconds / total_duration
+    normalized_durations = [duration * normalized_duration_scale for duration in durations]
+    normalized_total = sum(normalized_durations)
+    if normalized_total and normalized_durations:
+        normalized_durations[-1] += estimated_duration_seconds - normalized_total
+
+    return tuple(max(minimum_duration_seconds, duration) for duration in normalized_durations)
 
 
 def _derive_reasoning_confidence_hint(
@@ -645,6 +697,10 @@ def _estimate_audio_duration_seconds(*, audio_file: str, audio_bytes: bytes) -> 
                     return max(1, int(round(frame_count / frame_rate)))
         except (wave.Error, EOFError):
             pass
+    if suffix == ".mp3":
+        estimated = _estimate_mp3_duration_seconds(audio_bytes=audio_bytes)
+        if estimated is not None:
+            return estimated
 
     bytes_per_second_by_format = {
         ".mp3": 16_000,
@@ -653,6 +709,237 @@ def _estimate_audio_duration_seconds(*, audio_file: str, audio_bytes: bytes) -> 
     }
     fallback_bps = bytes_per_second_by_format.get(suffix, 16_000)
     return max(1, int(round(len(audio_bytes) / fallback_bps)))
+
+
+def _parse_mp3_frame_header(*, audio_bytes: bytes, offset: int) -> tuple[int, int, int, int, int, int, bool] | None:
+    header = audio_bytes[offset:offset + 4]
+    if len(header) < 4:
+        return None
+
+    first, second, third, fourth = header
+    if first != 0xFF or (second & 0xE0) != 0xE0:
+        return None
+
+    version_id = (second >> 3) & 0x03
+    layer_id = (second >> 1) & 0x03
+    if version_id == 0x01 or layer_id == 0x00:
+        return None
+
+    bitrate_index = (third >> 4) & 0x0F
+    sample_rate_index = (third >> 2) & 0x03
+    padding_bit = (third >> 1) & 0x01
+    if bitrate_index == 0 or bitrate_index == 0x0F or sample_rate_index == 0x03:
+        return None
+
+    sample_rates = {
+        3: (44100, 48000, 32000),
+        2: (22050, 24000, 16000),
+        0: (11025, 12000, 8000),
+    }.get(version_id)
+    if sample_rates is None:
+        return None
+
+    sample_rate = sample_rates[sample_rate_index]
+    bitrate_table = {
+        3: {
+            1: (0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320),
+            2: (0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384),
+            3: (0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448),
+        },
+        2: {
+            1: (0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320),
+            2: (0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160),
+            3: (0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256),
+        },
+        0: {
+            1: (0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320),
+            2: (0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160),
+            3: (0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256),
+        },
+    }.get(version_id)
+    if bitrate_table is None:
+        return None
+
+    layer_to_kbps = bitrate_table.get(layer_id)
+    if layer_to_kbps is None or bitrate_index >= len(layer_to_kbps):
+        return None
+
+    bitrate_kbps = layer_to_kbps[bitrate_index]
+    if bitrate_kbps <= 0:
+        return None
+
+    if layer_id == 3:
+        samples_per_frame = 384
+        frame_length = int(12 * bitrate_kbps * 1000 * 4 / sample_rate) + padding_bit
+    elif layer_id == 2:
+        samples_per_frame = 1152
+        frame_length = int(144 * bitrate_kbps * 1000 / sample_rate) + padding_bit
+    else:
+        samples_per_frame = 576 if version_id in (0, 2) else 1152
+        factor = 72 if version_id in (0, 2) else 144
+        frame_length = int(factor * bitrate_kbps * 1000 / sample_rate) + padding_bit
+
+    if frame_length <= 0:
+        return None
+
+    channel_mode = fourth >> 6
+    has_crc = (second & 0x01) == 0
+
+    return sample_rate, bitrate_kbps, samples_per_frame, frame_length, version_id, channel_mode, has_crc
+
+
+def _mp3_side_info_byte_count(*, version_id: int, channel_mode: int, has_crc: bool) -> int | None:
+    if version_id == 3:
+        base_side_info = 17 if channel_mode == 3 else 32
+    elif version_id in (2, 0):
+        base_side_info = 9 if channel_mode == 3 else 17
+    else:
+        return None
+
+    return base_side_info + (2 if has_crc else 0)
+
+
+def _parse_mp3_xing_total_frames(
+    *,
+    audio_bytes: bytes,
+    frame_offset: int,
+    parsed_frame: tuple[int, int, int, int, int, int, bool],
+) -> int | None:
+    sample_rate, _, samples_per_frame, _, version_id, channel_mode, has_crc = parsed_frame
+    side_info = _mp3_side_info_byte_count(
+        version_id=version_id,
+        channel_mode=channel_mode,
+        has_crc=has_crc,
+    )
+    if side_info is None:
+        return None
+
+    magic_offset = frame_offset + 4 + side_info
+    magic = audio_bytes[magic_offset:magic_offset + 4]
+    if magic not in {b"Xing", b"Info"}:
+        return None
+
+    flags_offset = magic_offset + 4
+    if flags_offset + 8 > len(audio_bytes):
+        return None
+
+    flags = int.from_bytes(audio_bytes[flags_offset:flags_offset + 4], byteorder="big")
+    if flags & 0x01 == 0:
+        return None
+
+    total_frames = int.from_bytes(audio_bytes[flags_offset + 4:flags_offset + 8], byteorder="big")
+    if total_frames <= 0:
+        return None
+
+    return max(1, int(round((total_frames * samples_per_frame) / sample_rate)))
+
+
+def _parse_mp3_vbri_total_frames(
+    *,
+    audio_bytes: bytes,
+    frame_offset: int,
+    parsed_frame: tuple[int, int, int, int, int, int, bool],
+) -> int | None:
+    sample_rate, _, samples_per_frame, _, version_id, channel_mode, has_crc = parsed_frame
+    side_info = _mp3_side_info_byte_count(
+        version_id=version_id,
+        channel_mode=channel_mode,
+        has_crc=has_crc,
+    )
+    if side_info is None:
+        return None
+
+    candidate_offsets = {
+        frame_offset + 0x24,
+        frame_offset + 0x24 + (2 if has_crc else 0),
+        frame_offset + 4 + side_info,
+    }
+
+    for candidate in sorted(candidate_offsets):
+        if candidate < 0 or candidate + 14 > len(audio_bytes):
+            continue
+        if audio_bytes[candidate:candidate + 4] != b"VBRI":
+            continue
+        total_frames = int.from_bytes(audio_bytes[candidate + 10:candidate + 14], byteorder="big")
+        if total_frames <= 0:
+            return None
+        return max(1, int(round((total_frames * samples_per_frame) / sample_rate)))
+
+    return None
+
+
+def _estimate_mp3_duration_seconds(*, audio_bytes: bytes) -> int | None:
+    frame_offsets = _find_mp3_frame_offsets(audio_bytes=audio_bytes)
+    if not frame_offsets:
+        return None
+
+    first_header: tuple[int, int, int, int, int, int, bool] | None = None
+    first_offset = 0
+    for candidate in frame_offsets:
+        parsed = _parse_mp3_frame_header(audio_bytes=audio_bytes, offset=candidate)
+        if parsed is not None:
+            first_offset = candidate
+            first_header = parsed
+            break
+
+    if first_header is None:
+        return None
+
+    xing_duration = _parse_mp3_xing_total_frames(
+        audio_bytes=audio_bytes,
+        frame_offset=first_offset,
+        parsed_frame=first_header,
+    )
+    if xing_duration is not None:
+        return xing_duration
+
+    vbri_duration = _parse_mp3_vbri_total_frames(
+        audio_bytes=audio_bytes,
+        frame_offset=first_offset,
+        parsed_frame=first_header,
+    )
+    if vbri_duration is not None:
+        return vbri_duration
+
+    sample_rate, _, _, frame_length, _, _, _ = first_header
+    if frame_length <= 0:
+        return None
+    if frame_length < 16 or frame_length > 4096 or sample_rate <= 0:
+        return None
+
+    total_samples = 0
+    frame_count = 0
+    index = first_offset
+    cursor = 0
+    while index + 4 < len(audio_bytes):
+        parsed = _parse_mp3_frame_header(audio_bytes=audio_bytes, offset=index)
+        if parsed is None:
+            index += 1
+            cursor += 1
+            if cursor > 64:
+                break
+            continue
+
+        local_sample_rate, _, local_samples_per_frame, local_frame_length, _, _, _ = parsed
+        if local_sample_rate != sample_rate or local_samples_per_frame <= 0:
+            index += 1
+            cursor += 1
+            continue
+        if local_frame_length < 16 or local_frame_length > 4096:
+            index += 1
+            cursor += 1
+            continue
+
+        total_samples += local_samples_per_frame
+        frame_count += 1
+        index += local_frame_length
+        cursor = 0
+
+    if not frame_count:
+        return None
+
+    duration_seconds = total_samples / sample_rate
+    return max(1, int(round(duration_seconds)))
 
 
 def _estimate_tempo_bpm(*, audio_bytes: bytes, digest: bytes) -> int:
@@ -779,8 +1066,10 @@ def _derive_melody_pitches(
     estimated_duration_seconds: int,
     estimated_tempo_bpm: int,
     tuning_settings: DashboardTuningSettings | None = None,
+    note_durations_seconds: list[float] | None = None,
 ) -> tuple[int, ...]:
     active_tuning = tuning_settings or _DEFAULT_TUNING_SETTINGS
+    pcm_durations: list[float] = []
     pcm_analysis = _extract_wav_pcm(audio_bytes=audio_bytes)
     if pcm_analysis is not None:
         inferred = _derive_melody_pitches_from_pcm(
@@ -789,8 +1078,11 @@ def _derive_melody_pitches(
             estimated_duration_seconds=estimated_duration_seconds,
             estimated_tempo_bpm=estimated_tempo_bpm,
             tuning_settings=active_tuning,
+            note_durations_seconds=pcm_durations if note_durations_seconds is not None else None,
         )
         if inferred:
+            if note_durations_seconds is not None:
+                note_durations_seconds.extend(pcm_durations)
             return inferred
 
     target_count = _derive_compressed_target_note_count(
@@ -1063,6 +1355,7 @@ def _derive_melody_pitches_from_pcm(
     estimated_duration_seconds: int,
     estimated_tempo_bpm: int,
     tuning_settings: DashboardTuningSettings | None = None,
+    note_durations_seconds: list[float] | None = None,
 ) -> tuple[int, ...]:
     active_tuning = tuning_settings or _DEFAULT_TUNING_SETTINGS
     onset_positions = _detect_pcm_onset_positions(samples=samples, sample_rate=sample_rate)
@@ -1070,6 +1363,7 @@ def _derive_melody_pitches_from_pcm(
         return ()
 
     melody: list[int] = []
+    captured_durations: list[float] = []
     segment_ends = onset_positions[1:] + [len(samples)]
     for segment_start, segment_end in zip(onset_positions, segment_ends):
         if segment_end - segment_start < max(64, sample_rate // 40):
@@ -1095,21 +1389,16 @@ def _derive_melody_pitches_from_pcm(
         )
         if inferred_pitch is None:
             continue
+        captured_durations.append((segment_end - segment_start) / sample_rate)
         melody.append(inferred_pitch)
 
     if not melody:
         return ()
 
     melody = _smooth_detected_melody(melody=melody)
-
-    target_count = min(1024, max(8, int(round(estimated_duration_seconds * max(1.0, estimated_tempo_bpm / 60.0)))))
-    if len(melody) >= target_count:
-        return tuple(melody[:target_count])
-
-    padded = melody.copy()
-    while len(padded) < target_count:
-        padded.append(melody[len(padded) % len(melody)])
-    return tuple(padded)
+    if note_durations_seconds is not None:
+        note_durations_seconds.extend(captured_durations)
+    return tuple(melody)
 
 
 def _infer_segment_pitch_midi(
@@ -1400,6 +1689,33 @@ def _build_transcription_text_with_analysis(
 
 
 
+def _build_musicxml_note_xml(
+    *,
+    pitch: int,
+    tempo_bpm: int,
+    duration_seconds: float,
+) -> str:
+    beat_duration = max(0.0, (duration_seconds * 60.0) / max(1, tempo_bpm))
+    duration = max(1, int(round(beat_duration * _DEFAULT_MUSICXML_DIVISIONS)))
+    return (
+        "      <note>"
+        f"<pitch><step>{_midi_pitch_to_step(pitch)}</step><octave>{_midi_pitch_to_octave(pitch)}</octave></pitch>"
+        f"<duration>{duration}</duration>"
+        "</note>"
+    )
+
+
+def _build_musicxml_tempo_direction(*, tempo_bpm: int) -> str:
+    tempo = max(1, int(round(tempo_bpm)))
+    return (
+        "      <direction placement=\"above\">"
+        "<direction-type><metronome><beat-unit>quarter</beat-unit>"
+        f"<per-minute>{tempo}</per-minute></metronome></direction-type>"
+        f"<sound tempo=\"{tempo}\"/>"
+        "</direction>"
+    )
+
+
 def _build_sheet_artifacts(
     *,
     job_id: str,
@@ -1411,13 +1727,20 @@ def _build_sheet_artifacts(
     if profile is None:
         profile = _analyze_audio_bytes(audio_file=audio_file, audio_bytes=audio_file.encode("utf-8"))
 
-    note_block = "\n".join(
-        (
-            "      <note><pitch><step>{step}</step><octave>{octave}</octave></pitch>"
-            "<duration>1</duration><type>quarter</type></note>"
-        ).format(step=_midi_pitch_to_step(pitch), octave=_midi_pitch_to_octave(pitch))
-        for pitch in profile.melody_pitches
+    normalized_durations = _normalize_note_durations_seconds(
+        melody=profile.melody_pitches,
+        estimated_duration_seconds=profile.estimated_duration_seconds,
+        detected_note_durations_seconds=profile.note_durations_seconds,
     )
+    note_block = "\n".join(
+        _build_musicxml_note_xml(
+            pitch=pitch,
+            tempo_bpm=profile.estimated_tempo_bpm,
+            duration_seconds=duration,
+        )
+        for pitch, duration in zip(profile.melody_pitches, normalized_durations)
+    )
+    tempo_direction = _build_musicxml_tempo_direction(tempo_bpm=profile.estimated_tempo_bpm)
     musicxml_payload = (
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
         "<!DOCTYPE score-partwise PUBLIC \"-//Recordare//DTD MusicXML 4.0 Partwise//EN\" "
@@ -1426,8 +1749,9 @@ def _build_sheet_artifacts(
         "  <part-list><score-part id=\"P1\"><part-name>Transcription</part-name></score-part></part-list>\n"
         "  <part id=\"P1\">\n"
         "    <measure number=\"1\">\n"
-        "      <attributes><divisions>1</divisions><key><fifths>0</fifths></key>"
+        f"      <attributes><divisions>{_DEFAULT_MUSICXML_DIVISIONS}</divisions><key><fifths>0</fifths></key>"
         "<time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>\n"
+        f"{tempo_direction}\n"
         f"{note_block}\n"
         "    </measure>\n"
         "  </part>\n"
@@ -1448,7 +1772,12 @@ def _build_sheet_artifacts(
             "midi",
             ".mid",
             "audio/midi",
-            _build_minimal_midi_payload(profile.melody_pitches),
+            _build_minimal_midi_payload(
+                melody_pitches=profile.melody_pitches,
+                note_durations_seconds=normalized_durations,
+                estimated_duration_seconds=profile.estimated_duration_seconds,
+                estimated_tempo_bpm=profile.estimated_tempo_bpm,
+            ),
         ),
         (
             "pdf",
@@ -1480,25 +1809,85 @@ def _build_sheet_artifacts(
     return artifacts
 
 
-def _build_minimal_midi_payload(melody_pitches: tuple[int, ...] = (60, 64, 67, 72)) -> bytes:
-    header = b"MThd" + (6).to_bytes(4, "big") + (0).to_bytes(2, "big") + (1).to_bytes(2, "big") + (96).to_bytes(2, "big")
+def _encode_midi_var_len(value: int) -> bytes:
+    value_int = max(0, int(value))
+    if value_int == 0:
+        return b"\x00"
+
+    encoded = bytearray()
+    while value_int > 0:
+        encoded.insert(0, value_int & 0x7F)
+        value_int >>= 7
+
+    for index in range(len(encoded) - 1):
+        encoded[index] |= 0x80
+    return bytes(encoded)
+
+
+def _tempo_to_midi_bytes(tempo_bpm: int) -> bytes:
+    beats_per_minute = max(1, int(round(tempo_bpm)))
+    microseconds_per_quarter = max(1, int(round(60_000_000 / beats_per_minute)))
+    microseconds_per_quarter = min(0xFFFFFF, microseconds_per_quarter)
+    return microseconds_per_quarter.to_bytes(3, "big")
+
+
+def _seconds_to_midi_ticks(
+    *,
+    duration_seconds: float,
+    tempo_bpm: int,
+    ticks_per_beat: int,
+) -> int:
+    duration = max(0.0, duration_seconds)
+    beats_per_second = max(1.0, float(ticks_per_beat) * max(1, tempo_bpm) / 60.0)
+    return max(1, int(round(duration * beats_per_second)))
+
+
+def _build_minimal_midi_payload(
+    melody_pitches: tuple[int, ...] = (60, 64, 67, 72),
+    note_durations_seconds: tuple[float, ...] = (),
+    *,
+    estimated_duration_seconds: int = 1,
+    estimated_tempo_bpm: int = 120,
+) -> bytes:
+    header = b"MThd" + (6).to_bytes(4, "big") + (0).to_bytes(2, "big") + (1).to_bytes(2, "big") + _DEFAULT_MIDI_TICKS_PER_QUARTER.to_bytes(2, "big")
+    durations = _normalize_note_durations_seconds(
+        melody=melody_pitches,
+        estimated_duration_seconds=estimated_duration_seconds,
+        detected_note_durations_seconds=note_durations_seconds,
+    )
+    tempo_bpm = max(1, int(round(estimated_tempo_bpm)))
+
     events = bytearray()
-    for pitch in melody_pitches:
+    events.extend(_encode_midi_var_len(0))
+    events.extend(b"\xFF\x51\x03")
+    events.extend(_tempo_to_midi_bytes(tempo_bpm))
+
+    for pitch, duration_seconds in zip(melody_pitches, durations):
         pitch_byte = max(0, min(127, pitch))
-        events.extend(b"\x00\x90")
+        duration_ticks = _seconds_to_midi_ticks(
+            duration_seconds=duration_seconds,
+            tempo_bpm=tempo_bpm,
+            ticks_per_beat=_DEFAULT_MIDI_TICKS_PER_QUARTER,
+        )
+
+        events.extend(_encode_midi_var_len(0))
+        events.append(0x90)
+        events.append(pitch_byte)
+        events.append(0x60)
+        events.extend(_encode_midi_var_len(duration_ticks))
+        events.append(0x80)
         events.append(pitch_byte)
         events.append(0x40)
-        events.extend(b"\x30\x80")
-        events.append(pitch_byte)
-        events.append(0x40)
-    events.extend(b"\x00\xff\x2f\x00")
+
+    events.extend(_encode_midi_var_len(0))
+    events.extend(b"\xFF\x2F\x00")
     track_events = bytes(events)
     track = b"MTrk" + len(track_events).to_bytes(4, "big") + track_events
     return header + track
 
 
 def _midi_pitch_to_step(pitch: int) -> str:
-    names = ["C", "C", "D", "D", "E", "F", "F", "G", "G", "A", "A", "B"]
+    names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
     return names[pitch % 12]
 
 
@@ -2070,6 +2459,7 @@ def serve_dashboard(*, config: DashboardServerConfig) -> None:
                 estimated_duration_seconds=profile.estimated_duration_seconds,
                 estimated_tempo_bpm=profile.estimated_tempo_bpm,
                 estimated_key=profile.estimated_key,
+                note_durations_seconds=profile.note_durations_seconds,
                 melody_pitches=_apply_instrument_profile(
                     melody=profile.melody_pitches,
                     instrument_profile=instrument_profile,
