@@ -117,3 +117,5 @@ Implementation checklist mirroring `Final_Spec.md`. Every item has a unique chec
 - [x] WC-TASK-028: Add a local dashboard Settings panel backed by predictable file-based tuning defaults, wire tuning controls into pitch inference, and expand exhaustive entrypoint branch coverage.
 - [x] WC-TASK-029: Expand transcription output with explicit reasoning trace diagnostics (tuning, melody evidence, contour evidence, confidence hint) and exhaustive branch coverage tests.
 - [x] WC-TASK-030: Add worker-transcription instrument presets (auto/acoustic/electric/piano/flute/violin) to improve acoustic instrument detection, emit preset/detected instrument metadata, and expand exhaustive branch-focused unit coverage.
+
+- [x] WC-TASK-031: Improve pitch recognition and tuning controls with noise-suppression/weighted detection options, add a pre-submit waveform exclusion stage, provide one-click dashboard+editor launchers, and expand exhaustive regression coverage.

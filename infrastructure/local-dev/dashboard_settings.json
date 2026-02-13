@@ -5,6 +5,11 @@
     "maxFrequencyHz": 2000,
     "frequencyClusterToleranceHz": 30.0,
     "pitchFloorMidi": 36,
-    "pitchCeilingMidi": 96
+    "pitchCeilingMidi": 96,
+    "noiseSuppressionLevel": 0.35,
+    "autocorrelationWeight": 0.5,
+    "spectralWeight": 0.35,
+    "zeroCrossingWeight": 0.15,
+    "transientSensitivity": 0.25
   }
 }

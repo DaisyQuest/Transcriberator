@@ -88,6 +88,8 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
         self.assertEqual(settings.max_frequency_hz, 2000)
         self.assertEqual(settings.pitch_floor_midi, 36)
         self.assertEqual(settings.pitch_ceiling_midi, 96)
+        self.assertAlmostEqual(settings.noise_suppression_level, 0.35)
+        self.assertAlmostEqual(settings.autocorrelation_weight + settings.spectral_weight + settings.zero_crossing_weight, 1.0)
 
     def test_load_dashboard_tuning_defaults_handles_invalid_payload(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -112,6 +114,9 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
         self.assertLessEqual(settings.min_frequency_hz, settings.max_frequency_hz)
         self.assertLessEqual(settings.pitch_floor_midi, settings.pitch_ceiling_midi)
         self.assertEqual(settings.frequency_cluster_tolerance_hz, 200.0)
+        self.assertGreaterEqual(settings.noise_suppression_level, 0.0)
+        self.assertLessEqual(settings.noise_suppression_level, 1.0)
+        self.assertAlmostEqual(settings.autocorrelation_weight + settings.spectral_weight + settings.zero_crossing_weight, 1.0)
 
     def test_run_startup_supports_draft_flow(self):
         summary = self.module.run_startup(mode='draft', owner_id='owner-a', project_name='Draft Smoke')
@@ -356,6 +361,44 @@ class TestStartupEntrypointRuntime(unittest.TestCase):
             wav_file.writeframes(bytes(samples))
         return buffer.getvalue()
 
+
+
+    def test_parse_and_apply_exclusion_ranges(self):
+        ranges = self.module._parse_exclusion_ranges(raw_ranges='0-2, 1.5-3, 9-12', estimated_duration_seconds=10)
+        self.assertEqual([(item.start_second, item.end_second) for item in ranges], [(0.0, 3.0), (9.0, 10.0)])
+
+        audio = bytes(range(100))
+        trimmed = self.module._apply_exclusion_ranges(
+            audio_bytes=audio,
+            estimated_duration_seconds=10,
+            ranges=ranges,
+        )
+        self.assertLess(len(trimmed), len(audio))
+
+    def test_parse_exclusion_ranges_validation_branch(self):
+        with self.assertRaisesRegex(self.module.StartupError, 'start-end pairs'):
+            self.module._parse_exclusion_ranges(raw_ranges='abc', estimated_duration_seconds=10)
+
+    def test_apply_noise_suppression_and_weighted_pitch_branch(self):
+        tuning = self.module.DashboardTuningSettings(
+            noise_suppression_level=1.0,
+            transient_sensitivity=0.0,
+            autocorrelation_weight=0.0,
+            spectral_weight=0.0,
+            zero_crossing_weight=1.0,
+        )
+        window = [90 if idx % 2 == 0 else -90 for idx in range(128)]
+        suppressed = self.module._apply_noise_suppression(analysis_window=window, tuning_settings=tuning)
+        self.assertEqual(len(suppressed), len(window))
+        inferred = self.module._infer_segment_pitch_midi(
+            analysis_window=window,
+            sample_rate=8_000,
+            tuning_settings=tuning,
+        )
+        self.assertIsNotNone(inferred)
+        assert inferred is not None
+        self.assertGreaterEqual(inferred, tuning.pitch_floor_midi)
+        self.assertLessEqual(inferred, tuning.pitch_ceiling_midi)
 
     def test_estimate_frequency_zero_crossing_branches(self):
         self.assertIsNone(
@@ -1524,3 +1567,56 @@ class TestEntrypointWrappersAndDocs(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestRunEverythingLauncher(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        path = REPO_ROOT / 'infrastructure' / 'local-dev' / 'run_everything.py'
+        spec = importlib.util.spec_from_file_location('run_everything', path)
+        module = importlib.util.module_from_spec(spec)
+        assert spec and spec.loader
+        _sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        cls.module = module
+
+    def test_build_arg_parser_defaults(self):
+        args = self.module.build_arg_parser().parse_args([])
+        self.assertEqual(args.dashboard_port, 4173)
+        self.assertEqual(args.editor_port, 3000)
+        self.assertEqual(args.mode, 'draft')
+
+    def test_main_starts_dashboard_and_editor_processes(self):
+        class FakeProc:
+            def __init__(self, return_code=0):
+                self._return_code = return_code
+                self.terminated = False
+
+            def wait(self):
+                return self._return_code
+
+            def poll(self):
+                return None if not self.terminated else self._return_code
+
+            def terminate(self):
+                self.terminated = True
+
+            def kill(self):
+                self.terminated = True
+
+        created = []
+
+        def fake_popen(cmd, cwd=None):
+            created.append((cmd, cwd))
+            return FakeProc()
+
+        with mock.patch.object(self.module.subprocess, 'Popen', side_effect=fake_popen):
+            with mock.patch.object(self.module.time, 'sleep', return_value=None):
+                code = self.module.main(['--host', '127.0.0.1'])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(len(created), 2)
+        self.assertIn('http.server', ' '.join(created[0][0]))
+        self.assertIn('start_transcriberator.py', ' '.join(created[1][0]))
+
+
