@@ -7,6 +7,7 @@ core stage-D responsibilities (pitch/onset/offset inference).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from statistics import median
 from typing import Iterable
 
 
@@ -72,19 +73,21 @@ class TranscriptionWorker:
         self._validate_preset(request.instrument_preset)
 
         self._validate_frames(request.analysis_frames)
-        isolated_pitches = self._isolate_prominent_pitches(request.analysis_frames)
+        normalized_frames = self._normalize_frames(request.analysis_frames)
+        isolated_pitches = self._isolate_prominent_pitches(normalized_frames)
 
-        if request.analysis_frames:
-            event_count = sum(len(frame) for frame in request.analysis_frames)
-            detected_chords = self._identify_chords(request.analysis_frames)
+        if normalized_frames:
+            event_count = sum(len(frame) for frame in normalized_frames)
+            detected_chords = self._identify_chords(normalized_frames)
             confidence = self._score_confidence(
                 polyphonic=request.polyphonic,
-                frame_count=len(request.analysis_frames),
+                frame_count=len(normalized_frames),
                 chord_count=len(detected_chords),
                 isolated_pitch_count=len(isolated_pitches),
+                harmonic_density=self._estimate_harmonic_density(normalized_frames),
             )
             detected_instrument, applied_preset = self._detect_instrument(
-                analysis_frames=request.analysis_frames,
+                analysis_frames=normalized_frames,
                 preset_name=request.instrument_preset,
                 chord_count=len(detected_chords),
                 polyphonic=request.polyphonic,
@@ -119,6 +122,17 @@ class TranscriptionWorker:
             for pitch in frame:
                 if not 0 <= pitch <= 127:
                     raise ValueError("analysis_frames pitches must be in [0, 127]")
+
+    def _normalize_frames(self, analysis_frames: tuple[tuple[int, ...], ...]) -> tuple[tuple[int, ...], ...]:
+        """Normalize frame content to reduce duplicate/noisy activations.
+
+        - Sort each frame for deterministic processing.
+        - Remove duplicate pitches within a frame while preserving temporal frame count.
+        """
+        normalized: list[tuple[int, ...]] = []
+        for frame in analysis_frames:
+            normalized.append(tuple(sorted(set(frame))))
+        return tuple(normalized)
 
     def _isolate_prominent_pitches(self, analysis_frames: tuple[tuple[int, ...], ...]) -> tuple[int, ...]:
         if not analysis_frames:
@@ -171,6 +185,7 @@ class TranscriptionWorker:
         frame_count: int,
         chord_count: int,
         isolated_pitch_count: int,
+        harmonic_density: float,
     ) -> float:
         if frame_count <= 0:
             return 0.0
@@ -178,8 +193,16 @@ class TranscriptionWorker:
         base = 0.6 if polyphonic else 0.75
         chord_bonus = min(0.2, chord_count * 0.05)
         stability_bonus = min(0.15, isolated_pitch_count / (frame_count * 2))
-        confidence = base + chord_bonus + stability_bonus
+        density_bonus = min(0.08, max(0.0, harmonic_density - 1.0) * 0.04)
+        confidence = base + chord_bonus + stability_bonus + density_bonus
         return round(min(0.99, confidence), 3)
+
+    def _estimate_harmonic_density(self, analysis_frames: tuple[tuple[int, ...], ...]) -> float:
+        if not analysis_frames:
+            return 0.0
+
+        frame_sizes = [len(frame) for frame in analysis_frames]
+        return float(median(frame_sizes))
 
     def _detect_instrument(
         self,
@@ -208,8 +231,17 @@ class TranscriptionWorker:
             )
             candidate_scores[candidate] = score
 
-        detected = max(candidate_scores, key=candidate_scores.get)
+        # Deterministic tie-breaking favors narrow-range instruments first to
+        # improve robustness for sparse monophonic passages.
+        detected = max(
+            sorted(candidate_scores),
+            key=lambda candidate: (candidate_scores[candidate], -self._profile_pitch_span(candidate)),
+        )
         return detected, "auto"
+
+    def _profile_pitch_span(self, profile_name: str) -> int:
+        profile = self._INSTRUMENT_PRESETS[profile_name]
+        return int(profile["max_pitch"] - profile["min_pitch"])
 
     def _score_instrument_candidate(
         self,
