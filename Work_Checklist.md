@@ -122,3 +122,5 @@ Implementation checklist mirroring `Final_Spec.md`. Every item has a unique chec
 - [x] WC-TASK-032: Harden worker-transcription sound-processing robustness with normalized frame analysis, enhanced confidence density scoring, deterministic instrument tie-breaking, and exhaustive branch-focused unit regression coverage.
 
 - [x] WC-TASK-033: Add configurable worker-transcription execution/chord/review planning metadata for MP3→MusicXML workflows and expand exhaustive branch-focused unit coverage.
+- [x] WC-TASK-034: Transform local dashboard UX into a preview-first transcription workspace with numeric slider controls and instrument-profile radio selection, including exhaustive branch-focused regression coverage.
+
