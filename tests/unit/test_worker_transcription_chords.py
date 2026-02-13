@@ -34,6 +34,9 @@ class TestTranscriptionWorkerChordIsolation(unittest.TestCase):
         self.assertEqual(poly.isolated_pitches, ())
         self.assertEqual(mono.detected_instrument, "unknown")
         self.assertEqual(poly.applied_preset, "auto")
+        self.assertEqual(len(mono.execution_plan), 11)
+        self.assertEqual(len(poly.chord_strategy), 7)
+        self.assertEqual(mono.review_flags, ("confidence_within_threshold",))
         self.assertGreater(mono.confidence, poly.confidence)
 
     def test_identifies_major_and_minor_chords_and_isolates_stable_pitches(self):
@@ -57,6 +60,7 @@ class TestTranscriptionWorkerChordIsolation(unittest.TestCase):
         self.assertEqual(result.isolated_pitches, (57, 60, 64, 67))
         self.assertEqual(result.detected_instrument, "acoustic_guitar")
         self.assertEqual(result.applied_preset, "auto")
+        self.assertEqual(result.review_flags, ("confidence_within_threshold",))
         self.assertGreaterEqual(result.confidence, 0.7)
         self.assertLessEqual(result.confidence, 0.99)
 
@@ -145,6 +149,33 @@ class TestTranscriptionWorkerChordIsolation(unittest.TestCase):
                 )
             )
 
+    def test_pipeline_config_validation_errors(self):
+        bad_cases = (
+            (MODULE.TranscriptionPipelineConfig(analysis_sample_rate_hz=0), "analysis_sample_rate_hz must be > 0"),
+            (MODULE.TranscriptionPipelineConfig(analysis_channels=3), "analysis_channels must be 1"),
+            (MODULE.TranscriptionPipelineConfig(frame_ms=10), r"frame_ms must be in \[20, 50\]"),
+            (MODULE.TranscriptionPipelineConfig(frame_overlap=1.0), r"frame_overlap must be in \[0.0, 1.0\)"),
+            (
+                MODULE.TranscriptionPipelineConfig(quantization_subdivisions=()),
+                "quantization_subdivisions must be non-empty",
+            ),
+            (MODULE.TranscriptionPipelineConfig(chord_vocabulary=()), "chord_vocabulary must be non-empty"),
+            (
+                MODULE.TranscriptionPipelineConfig(low_confidence_threshold=1.1),
+                r"low_confidence_threshold must be in \[0.0, 1.0\]",
+            ),
+        )
+        for config, message in bad_cases:
+            with self.subTest(config=config):
+                with self.assertRaisesRegex(ValueError, message):
+                    self.worker.process(
+                        MODULE.TranscriptionTaskRequest(
+                            source_uri="blob://audio",
+                            polyphonic=False,
+                            pipeline_config=config,
+                        )
+                    )
+
     def test_monophonic_confidence_path_with_analysis_frames(self):
         result = self.worker.process(
             MODULE.TranscriptionTaskRequest(
@@ -211,6 +242,71 @@ class TestTranscriptionWorkerChordIsolation(unittest.TestCase):
 
         self.assertEqual(result.detected_instrument, "electric_guitar")
         self.assertEqual(result.applied_preset, "electric_guitar")
+
+    def test_execution_plan_reflects_configurability(self):
+        result = self.worker.process(
+            MODULE.TranscriptionTaskRequest(
+                source_uri="blob://plan",
+                polyphonic=False,
+                analysis_frames=((72,), (74,), (76,)),
+                pipeline_config=MODULE.TranscriptionPipelineConfig(
+                    analysis_sample_rate_hz=48_000,
+                    analysis_channels=2,
+                    frame_ms=40,
+                    frame_overlap=0.25,
+                    enable_source_separation=False,
+                    enable_dynamics_and_articulations=True,
+                    quantization_subdivisions=("1/8", "1/16", "triplet"),
+                ),
+            )
+        )
+
+        self.assertIn("sample_rate=48000", result.execution_plan[0])
+        self.assertIn("channels=2", result.execution_plan[0])
+        self.assertIn("frame_ms=40", result.execution_plan[0])
+        self.assertIn("overlap=0.25", result.execution_plan[0])
+        self.assertIn("separate_sources(disabled)", result.execution_plan[1])
+        self.assertIn("infer_dynamics_articulations(enabled)", result.execution_plan[8])
+        self.assertIn("subdivisions=1/8,1/16,triplet", result.execution_plan[5])
+
+    def test_chord_strategy_reflects_custom_vocabulary(self):
+        result = self.worker.process(
+            MODULE.TranscriptionTaskRequest(
+                source_uri="blob://harmony",
+                polyphonic=True,
+                analysis_frames=((60, 64, 67),),
+                pipeline_config=MODULE.TranscriptionPipelineConfig(
+                    chord_vocabulary=("major", "minor", "sus4")
+                ),
+            )
+        )
+        self.assertIn("vocabulary=major,minor,sus4", result.chord_strategy[1])
+
+    def test_review_flags_cover_disabled_and_low_confidence_paths(self):
+        disabled = self.worker.process(
+            MODULE.TranscriptionTaskRequest(
+                source_uri="blob://review-off",
+                polyphonic=False,
+                analysis_frames=((60,),),
+                pipeline_config=MODULE.TranscriptionPipelineConfig(enable_human_review=False),
+            )
+        )
+        self.assertEqual(disabled.review_flags, ("human_review_disabled",))
+
+        low = self.worker.process(
+            MODULE.TranscriptionTaskRequest(
+                source_uri="blob://review-low",
+                polyphonic=True,
+                analysis_frames=((60,), (61,), (62,), (63,)),
+                pipeline_config=MODULE.TranscriptionPipelineConfig(low_confidence_threshold=0.9),
+            )
+        )
+        self.assertEqual(len(low.review_flags), 2)
+        self.assertTrue(low.review_flags[0].startswith("low_confidence_segment("))
+        self.assertEqual(
+            low.review_flags[1],
+            "suggest_actions:re-quantize,key_adjust,merge_split_notes,fix_chords",
+        )
 
     def test_detect_instrument_returns_unknown_when_frames_are_empty(self):
         detected, preset = self.worker._detect_instrument(
