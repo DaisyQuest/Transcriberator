@@ -6,7 +6,7 @@ core stage-D responsibilities (pitch/onset/offset inference).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from statistics import median
 from typing import Iterable
 
@@ -20,6 +20,38 @@ class TranscriptionTaskRequest:
     # simultaneous MIDI pitches that should be interpreted as active notes.
     analysis_frames: tuple[tuple[int, ...], ...] = ()
     instrument_preset: str = "auto"
+    # Optional per-request controls used to build a deterministic and explicit
+    # transcription execution plan. These controls are intentionally simple so
+    # local development flows can tune behavior without external dependencies.
+    pipeline_config: "TranscriptionPipelineConfig" = field(default_factory=lambda: TranscriptionPipelineConfig())
+
+
+@dataclass(frozen=True)
+class TranscriptionPipelineConfig:
+    analysis_sample_rate_hz: int = 44_100
+    analysis_channels: int = 1
+    frame_ms: int = 25
+    frame_overlap: float = 0.5
+    enable_source_separation: bool = True
+    enable_dynamics_and_articulations: bool = False
+    enable_human_review: bool = True
+    quantization_subdivisions: tuple[str, ...] = ("1/4", "1/8", "1/16", "triplet")
+    chord_vocabulary: tuple[str, ...] = (
+        "major",
+        "minor",
+        "diminished",
+        "augmented",
+        "dominant7",
+        "major7",
+        "minor7",
+        "half-diminished7",
+        "diminished7",
+        "sus2",
+        "sus4",
+        "add9",
+        "6",
+    )
+    low_confidence_threshold: float = 0.65
 
 
 @dataclass(frozen=True)
@@ -31,6 +63,9 @@ class TranscriptionTaskResult:
     detected_chords: tuple[str, ...] = ()
     detected_instrument: str = "unknown"
     applied_preset: str = "auto"
+    execution_plan: tuple[str, ...] = ()
+    chord_strategy: tuple[str, ...] = ()
+    review_flags: tuple[str, ...] = ()
 
 
 class TranscriptionWorker:
@@ -71,6 +106,7 @@ class TranscriptionWorker:
         if not request.model_version:
             raise ValueError("model_version is required")
         self._validate_preset(request.instrument_preset)
+        self._validate_pipeline_config(request.pipeline_config)
 
         self._validate_frames(request.analysis_frames)
         normalized_frames = self._normalize_frames(request.analysis_frames)
@@ -100,6 +136,14 @@ class TranscriptionWorker:
             detected_instrument = "unknown"
             applied_preset = request.instrument_preset
 
+        execution_plan = self._build_execution_plan(request.pipeline_config)
+        chord_strategy = self._build_chord_strategy(request.pipeline_config)
+        review_flags = self._build_review_flags(
+            confidence=confidence,
+            low_confidence_threshold=request.pipeline_config.low_confidence_threshold,
+            enable_human_review=request.pipeline_config.enable_human_review,
+        )
+
         return TranscriptionTaskResult(
             event_count=event_count,
             confidence=confidence,
@@ -108,7 +152,72 @@ class TranscriptionWorker:
             detected_chords=detected_chords,
             detected_instrument=detected_instrument,
             applied_preset=applied_preset,
+            execution_plan=execution_plan,
+            chord_strategy=chord_strategy,
+            review_flags=review_flags,
         )
+
+    def _validate_pipeline_config(self, config: TranscriptionPipelineConfig) -> None:
+        if config.analysis_sample_rate_hz <= 0:
+            raise ValueError("analysis_sample_rate_hz must be > 0")
+        if config.analysis_channels not in (1, 2):
+            raise ValueError("analysis_channels must be 1 (mono) or 2 (stereo)")
+        if not 20 <= config.frame_ms <= 50:
+            raise ValueError("frame_ms must be in [20, 50]")
+        if not 0.0 <= config.frame_overlap < 1.0:
+            raise ValueError("frame_overlap must be in [0.0, 1.0)")
+        if not config.quantization_subdivisions:
+            raise ValueError("quantization_subdivisions must be non-empty")
+        if not config.chord_vocabulary:
+            raise ValueError("chord_vocabulary must be non-empty")
+        if not 0.0 <= config.low_confidence_threshold <= 1.0:
+            raise ValueError("low_confidence_threshold must be in [0.0, 1.0]")
+
+    def _build_execution_plan(self, config: TranscriptionPipelineConfig) -> tuple[str, ...]:
+        stage_2 = "enabled" if config.enable_source_separation else "disabled"
+        stage_9 = "enabled" if config.enable_dynamics_and_articulations else "disabled"
+        stage_11 = "enabled" if config.enable_human_review else "disabled"
+        return (
+            f"1) ingest_normalize(sample_rate={config.analysis_sample_rate_hz}, channels={config.analysis_channels}, frame_ms={config.frame_ms}, overlap={config.frame_overlap:.2f})",
+            f"2) separate_sources({stage_2})",
+            "3) detect_tempo_time_signature_beat_grid",
+            "4) pitch_tracking_monophonic",
+            "5) multi_pitch_polyphonic",
+            f"6) quantize_rhythm(subdivisions={','.join(config.quantization_subdivisions)})",
+            "7) detect_key_and_pitch_spelling",
+            "8) assign_voices_parts_staffs",
+            f"9) infer_dynamics_articulations({stage_9})",
+            "10) build_musicxml_with_validation",
+            f"11) confidence_and_human_review({stage_11}, threshold={config.low_confidence_threshold:.2f})",
+        )
+
+    def _build_chord_strategy(self, config: TranscriptionPipelineConfig) -> tuple[str, ...]:
+        vocabulary = ",".join(config.chord_vocabulary)
+        return (
+            "A) chromagram_pitch_class_representation(beat_synchronous)",
+            f"B) chord_candidate_scoring(vocabulary={vocabulary})",
+            "C) bass_lock_root_and_inversions",
+            "D) sequence_smoothing(viterbi_transition_penalties)",
+            "E) chord_boundary_detection(strong_beats_and_change_points)",
+            "F) ambiguity_resolution(prefer_simpler_labels_on_low_confidence)",
+            "G) musicxml_harmony_encoding(root_kind_optional_bass)",
+        )
+
+    def _build_review_flags(
+        self,
+        *,
+        confidence: float,
+        low_confidence_threshold: float,
+        enable_human_review: bool,
+    ) -> tuple[str, ...]:
+        if not enable_human_review:
+            return ("human_review_disabled",)
+        if confidence < low_confidence_threshold:
+            return (
+                f"low_confidence_segment(confidence={confidence:.3f}, threshold={low_confidence_threshold:.3f})",
+                "suggest_actions:re-quantize,key_adjust,merge_split_notes,fix_chords",
+            )
+        return ("confidence_within_threshold",)
 
     def _validate_preset(self, preset_name: str) -> None:
         if preset_name not in self._INSTRUMENT_PRESETS:
