@@ -59,6 +59,21 @@ Use the repository-root wrappers so startup commands are consistent across Linux
 
 Both wrappers call `infrastructure/local-dev/start_transcriberator.py`, which now starts a local dashboard for interactive audio upload/transcription flows.
 
+### One-click dashboard + editor startup
+
+Use the combined wrappers when you want both surfaces online immediately:
+
+```bash
+./run-all.sh --mode draft
+```
+
+```powershell
+.\run-all.ps1 -mode hq
+```
+
+These wrappers run `infrastructure/local-dev/run_everything.py`, which starts a local editor web server and then launches the dashboard with its editor link pre-wired.
+
+
 Use `--smoke-run --json` for machine-readable smoke output and `--smoke-run --fail-stage source_separation --no-hq-degradation` to validate failure-path observability.
 
 ## Local Validation Workflow

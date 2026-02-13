@@ -19,6 +19,7 @@ import sys
 import tempfile
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
+
 import uuid
 import wave
 import xml.etree.ElementTree as ET
@@ -34,6 +35,12 @@ _CLASSIC_MELODY_CONTOUR_TEMPLATES: tuple[tuple[int, ...], ...] = (
 class StartupError(RuntimeError):
     """Raised when startup execution cannot complete successfully."""
 
+
+
+@dataclass(frozen=True)
+class ExclusionRange:
+    start_second: float
+    end_second: float
 
 @dataclass(frozen=True)
 class DashboardServerConfig:
@@ -67,6 +74,11 @@ class DashboardTuningSettings:
     frequency_cluster_tolerance_hz: float = 30.0
     pitch_floor_midi: int = 36
     pitch_ceiling_midi: int = 96
+    noise_suppression_level: float = 0.35
+    autocorrelation_weight: float = 0.5
+    spectral_weight: float = 0.35
+    zero_crossing_weight: float = 0.15
+    transient_sensitivity: float = 0.25
 
 
 _DEFAULT_DASHBOARD_SETTINGS_PATH = "infrastructure/local-dev/dashboard_settings.json"
@@ -107,6 +119,45 @@ def _normalize_tuning_settings(raw: dict[str, Any] | None) -> DashboardTuningSet
     pitch_ceiling_midi = _as_int("pitchCeilingMidi", _DEFAULT_TUNING_SETTINGS.pitch_ceiling_midi, minimum=0, maximum=127)
     if pitch_floor_midi > pitch_ceiling_midi:
         pitch_floor_midi, pitch_ceiling_midi = pitch_ceiling_midi, pitch_floor_midi
+    noise_suppression_level = _as_float(
+        "noiseSuppressionLevel",
+        _DEFAULT_TUNING_SETTINGS.noise_suppression_level,
+        minimum=0.0,
+        maximum=1.0,
+    )
+    autocorrelation_weight = _as_float(
+        "autocorrelationWeight",
+        _DEFAULT_TUNING_SETTINGS.autocorrelation_weight,
+        minimum=0.0,
+        maximum=1.0,
+    )
+    spectral_weight = _as_float(
+        "spectralWeight",
+        _DEFAULT_TUNING_SETTINGS.spectral_weight,
+        minimum=0.0,
+        maximum=1.0,
+    )
+    zero_crossing_weight = _as_float(
+        "zeroCrossingWeight",
+        _DEFAULT_TUNING_SETTINGS.zero_crossing_weight,
+        minimum=0.0,
+        maximum=1.0,
+    )
+    transient_sensitivity = _as_float(
+        "transientSensitivity",
+        _DEFAULT_TUNING_SETTINGS.transient_sensitivity,
+        minimum=0.0,
+        maximum=1.0,
+    )
+    total_weight = autocorrelation_weight + spectral_weight + zero_crossing_weight
+    if total_weight <= 0:
+        autocorrelation_weight = _DEFAULT_TUNING_SETTINGS.autocorrelation_weight
+        spectral_weight = _DEFAULT_TUNING_SETTINGS.spectral_weight
+        zero_crossing_weight = _DEFAULT_TUNING_SETTINGS.zero_crossing_weight
+        total_weight = autocorrelation_weight + spectral_weight + zero_crossing_weight
+    autocorrelation_weight /= total_weight
+    spectral_weight /= total_weight
+    zero_crossing_weight /= total_weight
 
     return DashboardTuningSettings(
         rms_gate=rms_gate,
@@ -115,6 +166,11 @@ def _normalize_tuning_settings(raw: dict[str, Any] | None) -> DashboardTuningSet
         frequency_cluster_tolerance_hz=frequency_cluster_tolerance_hz,
         pitch_floor_midi=pitch_floor_midi,
         pitch_ceiling_midi=pitch_ceiling_midi,
+        noise_suppression_level=noise_suppression_level,
+        autocorrelation_weight=autocorrelation_weight,
+        spectral_weight=spectral_weight,
+        zero_crossing_weight=zero_crossing_weight,
+        transient_sensitivity=transient_sensitivity,
     )
 
 
@@ -136,6 +192,78 @@ def _load_dashboard_tuning_defaults(*, path: Path | None = None) -> DashboardTun
         return _DEFAULT_TUNING_SETTINGS
     return _normalize_tuning_settings(tuning_section)
 
+
+
+
+def _parse_exclusion_ranges(*, raw_ranges: str, estimated_duration_seconds: int) -> tuple[ExclusionRange, ...]:
+    if not raw_ranges.strip() or estimated_duration_seconds <= 0:
+        return ()
+
+    ranges: list[ExclusionRange] = []
+    for token in raw_ranges.split(','):
+        token = token.strip()
+        if not token:
+            continue
+        if '-' not in token:
+            raise StartupError("Exclude ranges must be provided as start-end pairs in seconds.")
+        left, right = token.split('-', 1)
+        try:
+            start = float(left.strip())
+            end = float(right.strip())
+        except ValueError as exc:
+            raise StartupError("Exclude ranges must use numeric second values.") from exc
+        if start < 0 or end < 0:
+            raise StartupError("Exclude ranges cannot be negative.")
+        if start == end:
+            continue
+        if start > end:
+            start, end = end, start
+        if start >= estimated_duration_seconds:
+            continue
+        clamped_end = min(float(estimated_duration_seconds), end)
+        ranges.append(ExclusionRange(start_second=start, end_second=clamped_end))
+
+    if not ranges:
+        return ()
+
+    ranges.sort(key=lambda item: item.start_second)
+    merged: list[ExclusionRange] = [ranges[0]]
+    for current in ranges[1:]:
+        prior = merged[-1]
+        if current.start_second <= prior.end_second:
+            merged[-1] = ExclusionRange(
+                start_second=prior.start_second,
+                end_second=max(prior.end_second, current.end_second),
+            )
+            continue
+        merged.append(current)
+    return tuple(merged)
+
+
+def _apply_exclusion_ranges(*, audio_bytes: bytes, estimated_duration_seconds: int, ranges: tuple[ExclusionRange, ...]) -> bytes:
+    if not ranges or estimated_duration_seconds <= 0 or not audio_bytes:
+        return audio_bytes
+
+    total_length = len(audio_bytes)
+    keep_segments: list[tuple[int, int]] = []
+    cursor = 0
+    for item in ranges:
+        start_index = max(0, min(total_length, int(round((item.start_second / estimated_duration_seconds) * total_length))))
+        end_index = max(0, min(total_length, int(round((item.end_second / estimated_duration_seconds) * total_length))))
+        if end_index <= start_index:
+            continue
+        if start_index > cursor:
+            keep_segments.append((cursor, start_index))
+        cursor = max(cursor, end_index)
+
+    if cursor < total_length:
+        keep_segments.append((cursor, total_length))
+
+    if not keep_segments:
+        return audio_bytes
+
+    trimmed = b''.join(audio_bytes[start:end] for start, end in keep_segments)
+    return trimmed or audio_bytes
 
 def _load_module(name: str, path: Path) -> Any:
     spec = importlib.util.spec_from_file_location(name, path)
@@ -960,40 +1088,77 @@ def _infer_segment_pitch_midi(
         return None
 
     active_tuning = tuning_settings or _DEFAULT_TUNING_SETTINGS
+    denoised_window = _apply_noise_suppression(analysis_window=analysis_window, tuning_settings=active_tuning)
 
-    if _calculate_window_rms(analysis_window=analysis_window) < active_tuning.rms_gate:
+    if _calculate_window_rms(analysis_window=denoised_window) < active_tuning.rms_gate:
         return None
 
-    zero_crossing_frequency = _estimate_frequency_zero_crossing(analysis_window=analysis_window, sample_rate=sample_rate, tuning_settings=active_tuning)
-    autocorrelation_frequency = _estimate_frequency_autocorrelation(analysis_window=analysis_window, sample_rate=sample_rate, tuning_settings=active_tuning)
-    spectral_frequency = _estimate_frequency_spectral_peak(analysis_window=analysis_window, sample_rate=sample_rate, tuning_settings=active_tuning)
+    zero_crossing_frequency = _estimate_frequency_zero_crossing(analysis_window=denoised_window, sample_rate=sample_rate, tuning_settings=active_tuning)
+    autocorrelation_frequency = _estimate_frequency_autocorrelation(analysis_window=denoised_window, sample_rate=sample_rate, tuning_settings=active_tuning)
+    spectral_frequency = _estimate_frequency_spectral_peak(analysis_window=denoised_window, sample_rate=sample_rate, tuning_settings=active_tuning)
+
+    weighted_candidates: list[tuple[float, float]] = []
+    if zero_crossing_frequency is not None:
+        weighted_candidates.append((zero_crossing_frequency, active_tuning.zero_crossing_weight))
+    if autocorrelation_frequency is not None:
+        weighted_candidates.append((autocorrelation_frequency, active_tuning.autocorrelation_weight))
+    if spectral_frequency is not None:
+        weighted_candidates.append((spectral_frequency, active_tuning.spectral_weight))
 
     candidate_frequencies = [
         frequency
-        for frequency in (zero_crossing_frequency, autocorrelation_frequency, spectral_frequency)
-        if frequency is not None and active_tuning.min_frequency_hz <= frequency <= active_tuning.max_frequency_hz
+        for frequency, _ in weighted_candidates
+        if active_tuning.min_frequency_hz <= frequency <= active_tuning.max_frequency_hz
     ]
     if not candidate_frequencies:
         return None
 
-    if len(candidate_frequencies) >= 2:
-        clustered_frequencies = _cluster_frequency_candidates(candidate_frequencies=candidate_frequencies, tuning_settings=active_tuning)
-        if clustered_frequencies:
-            frequency_hz = sum(clustered_frequencies) / len(clustered_frequencies)
-        elif autocorrelation_frequency is not None:
-            frequency_hz = autocorrelation_frequency
-        elif spectral_frequency is not None:
-            frequency_hz = spectral_frequency
-        else:
-            frequency_hz = candidate_frequencies[0]
-    elif autocorrelation_frequency is not None:
-        frequency_hz = autocorrelation_frequency
+    clustered_frequencies = _cluster_frequency_candidates(candidate_frequencies=candidate_frequencies, tuning_settings=active_tuning)
+    cluster_center = sum(clustered_frequencies) / len(clustered_frequencies) if clustered_frequencies else None
+
+    weighted_sum = 0.0
+    total_weight = 0.0
+    for frequency, weight in weighted_candidates:
+        if not (active_tuning.min_frequency_hz <= frequency <= active_tuning.max_frequency_hz):
+            continue
+        if cluster_center is not None and abs(frequency - cluster_center) > active_tuning.frequency_cluster_tolerance_hz:
+            weight *= 0.5
+        weighted_sum += frequency * weight
+        total_weight += weight
+
+    if total_weight <= 0:
+        frequency_hz = autocorrelation_frequency or spectral_frequency or candidate_frequencies[0]
     else:
-        frequency_hz = candidate_frequencies[0]
+        frequency_hz = weighted_sum / total_weight
 
     midi_pitch = int(round(69 + (12 * math.log2(frequency_hz / 440.0))))
     return max(active_tuning.pitch_floor_midi, min(active_tuning.pitch_ceiling_midi, midi_pitch))
 
+
+
+
+def _apply_noise_suppression(
+    *, analysis_window: list[int], tuning_settings: DashboardTuningSettings | None = None
+) -> list[int]:
+    if len(analysis_window) < 3:
+        return analysis_window
+
+    active_tuning = tuning_settings or _DEFAULT_TUNING_SETTINGS
+    gate = int(round(active_tuning.noise_suppression_level * 12))
+    smoothed: list[int] = [analysis_window[0]]
+    for index in range(1, len(analysis_window) - 1):
+        prior = analysis_window[index - 1]
+        current = analysis_window[index]
+        nxt = analysis_window[index + 1]
+        local_mean = int(round((prior + current + nxt) / 3))
+        if abs(current - local_mean) <= gate:
+            smoothed.append(local_mean)
+        else:
+            sensitivity = max(0.0, min(1.0, tuning_settings.transient_sensitivity if tuning_settings else active_tuning.transient_sensitivity))
+            blended = int(round((current * sensitivity) + (local_mean * (1.0 - sensitivity))))
+            smoothed.append(blended)
+    smoothed.append(analysis_window[-1])
+    return smoothed
 
 def _estimate_frequency_zero_crossing(
     *, analysis_window: list[int], sample_rate: int, tuning_settings: DashboardTuningSettings | None = None
@@ -1418,6 +1583,9 @@ def _render_page(
             f"(<a href='{html.escape(artifact['downloadPath'])}' target='_blank' rel='noopener'>open</a>)</li>"
             for artifact in job.get("sheetArtifacts", [])
         )
+        excluded_ranges_text = ', '.join(
+            f"{entry['start']:.2f}-{entry['end']:.2f}s" for entry in job.get('excludedRanges', [])
+        ) or 'none'
         rows.append(
             "<article class='job-card'>"
             f"<h3>{html.escape(job['audioFile'])}</h3>"
@@ -1428,6 +1596,7 @@ def _render_page(
             f"<strong>Estimated tempo:</strong> {html.escape(str(job['estimatedTempoBpm']))} BPM | "
             f"<strong>Estimated key:</strong> {html.escape(job['estimatedKey'])} major | "
             f"<strong>Derived notes:</strong> {html.escape(str(job['derivedNoteCount']))}</p>"
+            f"<p><strong>Excluded ranges:</strong> {html.escape(excluded_ranges_text)}</p>"
             f"<p><strong>Transcription output:</strong> <code>{html.escape(job['transcriptionPath'])}</code><br/>"
             f"<a href='/outputs/transcription?job={html.escape(job['jobId'])}' target='_blank' rel='noopener'>View raw output</a></p>"
             f"<p><strong>Editor:</strong> <a href='{html.escape(job['editorUrl'])}' target='_blank' rel='noopener'>Open editor for this job</a></p>"
@@ -1483,12 +1652,28 @@ def _render_page(
     <input id='pitch_floor_midi' name='pitch_floor_midi' type='number' min='0' max='127' value='{tuning_settings.pitch_floor_midi}'/><br/><br/>
     <label for='pitch_ceiling_midi'>Pitch ceiling (MIDI):</label>
     <input id='pitch_ceiling_midi' name='pitch_ceiling_midi' type='number' min='0' max='127' value='{tuning_settings.pitch_ceiling_midi}'/><br/><br/>
+    <label for='noise_suppression_level'>Noise suppression level:</label>
+    <input id='noise_suppression_level' name='noise_suppression_level' type='number' step='0.01' min='0' max='1' value='{tuning_settings.noise_suppression_level}'/><br/><br/>
+    <label for='autocorrelation_weight'>Autocorrelation weight:</label>
+    <input id='autocorrelation_weight' name='autocorrelation_weight' type='number' step='0.01' min='0' max='1' value='{tuning_settings.autocorrelation_weight}'/><br/><br/>
+    <label for='spectral_weight'>Spectral weight:</label>
+    <input id='spectral_weight' name='spectral_weight' type='number' step='0.01' min='0' max='1' value='{tuning_settings.spectral_weight}'/><br/><br/>
+    <label for='zero_crossing_weight'>Zero-crossing weight:</label>
+    <input id='zero_crossing_weight' name='zero_crossing_weight' type='number' step='0.01' min='0' max='1' value='{tuning_settings.zero_crossing_weight}'/><br/><br/>
+    <label for='transient_sensitivity'>Transient sensitivity:</label>
+    <input id='transient_sensitivity' name='transient_sensitivity' type='number' step='0.01' min='0' max='1' value='{tuning_settings.transient_sensitivity}'/><br/><br/>
     <button type='submit'>Save settings</button>
   </form>
 
   <form action='/transcribe' method='post' enctype='multipart/form-data'>
     <label for='audio'>Audio file:</label><br/>
     <input id='audio' type='file' name='audio' accept='.mp3,.wav,.flac,audio/*' required/><br/><br/>
+    <h2>Pre-submit cleanup stage</h2>
+    <p class='hint'>Load audio, preview waveform, and mark time ranges to exclude before transcription.</p>
+    <canvas id='waveform_preview' width='900' height='120' style='width:100%;border:1px solid #ddd;margin-bottom:0.75rem;'></canvas><br/>
+    <label for='exclude_ranges'>Exclude ranges (seconds, e.g. 0-2.5, 7-9):</label><br/>
+    <input id='exclude_ranges' name='exclude_ranges' type='text' style='width:100%;' placeholder='Leave blank to keep full recording.'/><br/>
+    <small class='hint'>Tip: click-and-drag on the waveform to add ranges quickly.</small><br/><br/>
     <label for='mode'>Mode:</label>
     <select id='mode' name='mode'>
       <option value='draft' {selected_draft}>Draft (fast)</option>
@@ -1695,6 +1880,11 @@ def serve_dashboard(*, config: DashboardServerConfig) -> None:
                 "frequencyClusterToleranceHz": fields.get("cluster_tolerance_hz", [str(state["tuning_settings"].frequency_cluster_tolerance_hz)])[0],
                 "pitchFloorMidi": fields.get("pitch_floor_midi", [str(state["tuning_settings"].pitch_floor_midi)])[0],
                 "pitchCeilingMidi": fields.get("pitch_ceiling_midi", [str(state["tuning_settings"].pitch_ceiling_midi)])[0],
+                "noiseSuppressionLevel": fields.get("noise_suppression_level", [str(state["tuning_settings"].noise_suppression_level)])[0],
+                "autocorrelationWeight": fields.get("autocorrelation_weight", [str(state["tuning_settings"].autocorrelation_weight)])[0],
+                "spectralWeight": fields.get("spectral_weight", [str(state["tuning_settings"].spectral_weight)])[0],
+                "zeroCrossingWeight": fields.get("zero_crossing_weight", [str(state["tuning_settings"].zero_crossing_weight)])[0],
+                "transientSensitivity": fields.get("transient_sensitivity", [str(state["tuning_settings"].transient_sensitivity)])[0],
             }
             state["tuning_settings"] = _normalize_tuning_settings(raw_values)
 
@@ -1703,7 +1893,8 @@ def serve_dashboard(*, config: DashboardServerConfig) -> None:
                 "Saved settings. "
                 f"RMS gate={state['tuning_settings'].rms_gate}, "
                 f"freq={state['tuning_settings'].min_frequency_hz}-{state['tuning_settings'].max_frequency_hz} Hz, "
-                f"MIDI range={state['tuning_settings'].pitch_floor_midi}-{state['tuning_settings'].pitch_ceiling_midi}."
+                f"MIDI range={state['tuning_settings'].pitch_floor_midi}-{state['tuning_settings'].pitch_ceiling_midi}, "
+                f"noise={state['tuning_settings'].noise_suppression_level}."
             )
             _redirect(self, f"/?{urlencode({'msg': msg_id})}")
 
@@ -1712,6 +1903,7 @@ def serve_dashboard(*, config: DashboardServerConfig) -> None:
             mode = state["default_mode"]
             filename = ""
             file_bytes = b""
+            exclude_ranges_raw = ""
 
             for part in parts:
                 header_blob, _, value = part.partition(b"\r\n\r\n")
@@ -1728,6 +1920,8 @@ def serve_dashboard(*, config: DashboardServerConfig) -> None:
                         end = headers.find('"', start + len(marker))
                         filename = headers[start + len(marker):end]
                     file_bytes = value
+                if 'name="exclude_ranges"' in headers:
+                    exclude_ranges_raw = value.decode("utf-8", errors="ignore").strip()
 
             normalized_mode = _validate_mode(mode)
             safe_filename = _validate_audio_filename(filename)
@@ -1753,6 +1947,17 @@ def serve_dashboard(*, config: DashboardServerConfig) -> None:
                 )
             )
 
+            estimated_duration_seconds = _estimate_audio_duration_seconds(audio_file=safe_filename, audio_bytes=file_bytes)
+            exclusion_ranges = _parse_exclusion_ranges(
+                raw_ranges=exclude_ranges_raw,
+                estimated_duration_seconds=estimated_duration_seconds,
+            )
+            processed_audio_bytes = _apply_exclusion_ranges(
+                audio_bytes=file_bytes,
+                estimated_duration_seconds=estimated_duration_seconds,
+                ranges=exclusion_ranges,
+            )
+
             summary = {
                 "ownerId": state["owner_id"],
                 "projectId": project.id,
@@ -1766,7 +1971,7 @@ def serve_dashboard(*, config: DashboardServerConfig) -> None:
             }
             profile = _analyze_audio_bytes(
                 audio_file=safe_filename,
-                audio_bytes=file_bytes,
+                audio_bytes=processed_audio_bytes,
                 tuning_settings=state["tuning_settings"],
             )
             transcription_text = _build_transcription_text_with_analysis(
@@ -1795,13 +2000,22 @@ def serve_dashboard(*, config: DashboardServerConfig) -> None:
             summary["estimatedTempoBpm"] = profile.estimated_tempo_bpm
             summary["estimatedKey"] = profile.estimated_key
             summary["derivedNoteCount"] = len(profile.melody_pitches)
+            summary["excludedRanges"] = [
+                {"start": item.start_second, "end": item.end_second}
+                for item in exclusion_ranges
+            ]
             summary["editorUrl"] = f"{config.editor_base_url.rstrip('/')}/?job={job.id}"
             state["jobs"].append(summary)
+            excluded_label = (
+                ", ".join(f"{item.start_second:.2f}-{item.end_second:.2f}s" for item in exclusion_ranges)
+                if exclusion_ranges else "none"
+            )
             return (
                 f"Transcription complete for {safe_filename}. "
                 f"Job {job.id} finished with status {summary['finalStatus']}. "
                 f"Output: {summary['transcriptionPath']}. "
                 f"Sheet music: {', '.join(artifact['path'] for artifact in artifacts)}. "
+                f"Excluded ranges: {excluded_label}. "
                 f"Editor: {summary['editorUrl']}"
             )
 
